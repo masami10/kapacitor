@@ -1,12 +1,14 @@
 package kapacitor
 
 import (
-	"bytes"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"text/template"
+	text "text/template"
 
+	"github.com/influxdata/kapacitor/bufpool"
 	"github.com/influxdata/kapacitor/edge"
 	"github.com/influxdata/kapacitor/keyvalue"
 	"github.com/influxdata/kapacitor/models"
@@ -17,16 +19,23 @@ import (
 
 type SideloadNode struct {
 	node
-	s      *pipeline.SideloadNode
-	source sideload.Source
-	order  []orderPattern
+	s          *pipeline.SideloadNode
+	source     sideload.Source
+	orderTmpls []orderTmpl
+
+	order []string
+
+	bufferPool *bufpool.Pool
 }
 
 // Create a new  SideloadNode which shifts points and batches in time.
 func newSideloadNode(et *ExecutingTask, n *pipeline.SideloadNode, d NodeDiagnostic) (*SideloadNode, error) {
 	sn := &SideloadNode{
-		node: node{Node: n, et: et, diag: d},
-		s:    n,
+		node:       node{Node: n, et: et, diag: d},
+		s:          n,
+		bufferPool: bufpool.New(),
+		order:      make([]string, len(n.OrderList)),
+		orderTmpls: make([]orderTmpl, len(n.OrderList)),
 	}
 	u, err := url.Parse(n.Source)
 	if err != nil {
@@ -43,15 +52,15 @@ func newSideloadNode(et *ExecutingTask, n *pipeline.SideloadNode, d NodeDiagnost
 		return nil, err
 	}
 	sn.source = src
-	sn.order = make([]orderPattern, len(n.OrderList))
 	for i, o := range n.OrderList {
-		op, err := newOrderPattern(o)
+		op, err := newOrderTmpl(o, sn.bufferPool)
 		if err != nil {
 			return nil, err
 		}
-		sn.order[i] = op
+		sn.orderTmpls[i] = op
 	}
 	sn.node.runF = sn.runSideload
+	sn.node.stopF = sn.stopSideload
 	return sn, nil
 }
 
@@ -65,67 +74,51 @@ func (n *SideloadNode) runSideload([]byte) error {
 	)
 	return consumer.Consume()
 }
-
-type orderPattern struct {
-	tags []string
-
-	fmt  string
-	args []interface{}
+func (n *SideloadNode) stopSideload() {
+	n.source.Close()
 }
 
-func newOrderPattern(pattern string) (orderPattern, error) {
-	start := 0
-	last := 0
-	open := false
-	var tags []string
-	var fmtBuf bytes.Buffer
-	for i, c := range pattern {
-		switch c {
-		case '{':
-			if pattern[i-1] == '\\' {
-				continue
-			}
-			open = true
-			fmtBuf.WriteString(pattern[last:i])
-			fmtBuf.WriteString("%s")
-			start = i + 1
-		case '}':
-			if pattern[i-1] == '\\' {
-				continue
-			}
-			tags = append(tags, pattern[start:i])
-			last = i + 1
-			open = false
-		default:
-		}
+type orderTmpl struct {
+	raw        string
+	tmpl       *text.Template
+	bufferPool *bufpool.Pool
+}
+
+func newOrderTmpl(text string, bp *bufpool.Pool) (orderTmpl, error) {
+	t, err := template.New("order").Parse(text)
+	if err != nil {
+		return orderTmpl{}, err
 	}
-	if open {
-		return orderPattern{}, errors.New("unterminated bracket in order pattern")
-	}
-	fmtBuf.WriteString(pattern[last:])
-	return orderPattern{
-		tags: tags,
-		fmt:  fmtBuf.String(),
-		args: make([]interface{}, len(tags)),
+	return orderTmpl{
+		raw:        text,
+		tmpl:       t,
+		bufferPool: bp,
 	}, nil
 }
 
-func (p orderPattern) Path(tags models.Tags) string {
-	for i, t := range p.tags {
-		p.args[i] = tags[t]
+func (t orderTmpl) Path(tags models.Tags) (string, error) {
+	buf := t.bufferPool.Get()
+	defer t.bufferPool.Put(buf)
+	err := t.tmpl.Execute(buf, tags)
+	if err != nil {
+		return "", err
 	}
-	return fmt.Sprintf(p.fmt, p.args...)
+	return buf.String(), nil
 }
 
 func (n *SideloadNode) doSideload(p edge.FieldsTagsTimeSetter) {
-	order := make([]string, len(n.order))
-	for i, o := range n.order {
-		order[i] = o.Path(p.Tags())
+	for i, o := range n.orderTmpls {
+		p, err := o.Path(p.Tags())
+		if err != nil {
+			n.diag.Error("failed to evaluate order template", err, keyvalue.KV("order", o.raw))
+			return
+		}
+		n.order[i] = p
 	}
 	if len(n.s.Fields) > 0 {
 		fields := p.Fields().Copy()
 		for key, dflt := range n.s.Fields {
-			value := n.source.Lookup(order, key)
+			value := n.source.Lookup(n.order, key)
 			if value == nil {
 				// Use default
 				fields[key] = dflt
@@ -144,7 +137,7 @@ func (n *SideloadNode) doSideload(p edge.FieldsTagsTimeSetter) {
 	if len(n.s.Tags) > 0 {
 		tags := p.Tags().Copy()
 		for key, dflt := range n.s.Tags {
-			value := n.source.Lookup(order, key)
+			value := n.source.Lookup(n.order, key)
 			if value == nil {
 				tags[key] = dflt
 			} else {

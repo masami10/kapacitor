@@ -3,13 +3,20 @@ package sideload
 import (
 	"encoding/json"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/ghodss/yaml"
 	"github.com/influxdata/kapacitor/keyvalue"
+	"github.com/influxdata/kapacitor/services/httpd"
 	"github.com/pkg/errors"
+)
+
+const (
+	reloadPath = "/sideload/reload"
+	basePath   = httpd.BasePath + reloadPath
 )
 
 type Diagnostic interface {
@@ -19,53 +26,91 @@ type Diagnostic interface {
 }
 
 type Service struct {
-	diag Diagnostic
+	diag   Diagnostic
+	routes []httpd.Route
 
 	mu      sync.Mutex
-	sources []*source
+	sources map[string]*source
+
+	HTTPDService interface {
+		AddRoutes([]httpd.Route) error
+		DelRoutes([]httpd.Route)
+	}
 }
 
 func NewService(d Diagnostic) *Service {
 	return &Service{
-		diag: d,
+		diag:    d,
+		sources: make(map[string]*source),
 	}
 }
 
 func (s *Service) Open() error {
-	return nil
+	// Define API routes
+	s.routes = []httpd.Route{
+		{
+			Method:      "POST",
+			Pattern:     reloadPath,
+			HandlerFunc: s.handleReload,
+		},
+	}
+
+	err := s.HTTPDService.AddRoutes(s.routes)
+	return errors.Wrap(err, "failed to add API routes")
 }
 func (s *Service) Close() error {
+	s.HTTPDService.DelRoutes(s.routes)
 	return nil
 }
 
-//  TODO
-// 1. Add integration tests
-// 2. Use cache for sources as well so duplicate sources are not created
-// 3. Figure out how to do type safety possibly require default value.
+func (s *Service) handleReload(w http.ResponseWriter, r *http.Request) {
+	err := s.Reload()
+	if err != nil {
+		httpd.HttpError(w, err.Error(), true, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Service) Reload() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for dir, src := range s.sources {
+		if err := src.updateCache(); err != nil {
+			return errors.Wrapf(err, "failed to update source %q", dir)
+		}
+	}
+	return nil
+}
 
 func (s *Service) Source(dir string) (Source, error) {
-	src := &source{
-		s:   s,
-		dir: dir,
-	}
-	err := src.updateCache()
-	if err != nil {
-		return nil, err
-	}
+	dir = filepath.Clean(dir)
 	s.mu.Lock()
-	s.sources = append(s.sources, src)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+
+	src, ok := s.sources[dir]
+	if !ok {
+		src = &source{
+			s:   s,
+			dir: dir,
+		}
+		err := src.updateCache()
+		if err != nil {
+			return nil, err
+		}
+		s.sources[dir] = src
+	}
+	src.referenceCount++
+
 	return src, nil
 }
 
 func (s *Service) removeSource(src *source) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := range s.sources {
-		if s.sources[i] == src {
-			s.sources = append(s.sources[:i], s.sources[i+1:]...)
-			break
-		}
+	src.referenceCount--
+	if src.referenceCount == 0 {
+		delete(s.sources, src.dir)
 	}
 }
 
@@ -75,10 +120,11 @@ type Source interface {
 }
 
 type source struct {
-	s     *Service
-	dir   string
-	mu    sync.RWMutex
-	cache map[string]map[string]interface{}
+	s              *Service
+	dir            string
+	mu             sync.RWMutex
+	cache          map[string]map[string]interface{}
+	referenceCount int
 }
 
 func (s *source) Close() {
@@ -103,6 +149,12 @@ func (s *source) updateCache() error {
 		rel, err := filepath.Rel(s.dir, path)
 		if err != nil {
 			return err
+		}
+		// The relative path must be a child of s.dir.
+		// If it starts with '.' then it is either outside of s.dir or equal to s.dir,
+		// both cases are invalid.
+		if len(rel) == 0 || rel[0] == '.' {
+			return errors.New("invalid relative path")
 		}
 		s.cache[rel] = values
 		return nil
