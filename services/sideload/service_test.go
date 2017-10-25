@@ -10,13 +10,11 @@ import (
 
 func NewService() *sideload.Service {
 	s := sideload.NewService(nil)
-	s.Open()
 	return s
 }
 
 func TestService_Source_Lookup(t *testing.T) {
 	s := NewService()
-	defer s.Close()
 
 	src, err := s.Source("testdata/src0")
 	if err != nil {

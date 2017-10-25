@@ -311,20 +311,14 @@ func (pm *pointMessage) ToResult() models.Result {
 	}
 }
 func (pm *pointMessage) ToRow() *models.Row {
-	tags := pm.GroupInfo().Tags
 	row := &models.Row{
 		Name: pm.name,
-		Tags: tags,
+		Tags: pm.tags,
 	}
 	row.Columns = make([]string, 1, len(pm.fields)+1)
 	row.Columns[0] = "time"
 	for f := range pm.fields {
 		row.Columns = append(row.Columns, f)
-	}
-	for t := range pm.tags {
-		if _, ok := tags[t]; !ok {
-			row.Columns = append(row.Columns, t)
-		}
 	}
 	// Sort all columns but leave time as first
 	sort.Strings(row.Columns[1:])
@@ -334,8 +328,6 @@ func (pm *pointMessage) ToRow() *models.Row {
 	row.Values[0][0] = pm.time
 	for i, c := range row.Columns[1:] {
 		if v, ok := pm.fields[c]; ok {
-			row.Values[0][i+1] = v
-		} else if v, ok := pm.tags[c]; ok {
 			row.Values[0][i+1] = v
 		}
 	}

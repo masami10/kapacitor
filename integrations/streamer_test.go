@@ -9641,42 +9641,39 @@ stream
 		Series: models.Rows{
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x"},
-				Columns: []string{"time", "f1", "f2", "t3", "value"},
+				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x", "t3": "one"},
+				Columns: []string{"time", "f1", "f2", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						0.0,
 						0.0,
-						"one",
 						1.0,
 					},
 				},
 			},
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y"},
-				Columns: []string{"time", "f1", "f2", "t3", "value"},
+				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						2.0,
 						3.5,
-						"why",
 						1.0,
 					},
 				},
 			},
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y"},
-				Columns: []string{"time", "f1", "f2", "t3", "value"},
+				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						12.0,
 						13.5,
-						"why",
 						1.0,
 					},
 				},
@@ -9716,42 +9713,39 @@ stream
 		Series: models.Rows{
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x"},
-				Columns: []string{"time", "f1", "f2", "t3", "value"},
+				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x", "t3": "one"},
+				Columns: []string{"time", "f1", "f2", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						0.0,
 						0.0,
-						"one",
 						1.0,
 					},
 				},
 			},
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y"},
-				Columns: []string{"time", "f1", "f2", "t3", "value"},
+				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						2.0,
 						3.5,
-						"why",
 						1.0,
 					},
 				},
 			},
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y"},
-				Columns: []string{"time", "f1", "f2", "t3", "value"},
+				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						12.0,
 						13.5,
-						"why",
 						1.0,
 					},
 				},
@@ -9795,45 +9789,42 @@ stream
 		Series: models.Rows{
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x"},
-				Columns: []string{"time", "f1", "f2", "other", "t3", "value"},
+				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x", "t3": "one"},
+				Columns: []string{"time", "f1", "f2", "other", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						0.0,
 						0.0,
 						-1.0,
-						"one",
 						1.0,
 					},
 				},
 			},
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y"},
-				Columns: []string{"time", "f1", "f2", "other", "t3", "value"},
+				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "other", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						2.0,
 						3.5,
 						56.0,
-						"why",
 						1.0,
 					},
 				},
 			},
 			{
 				Name:    "m",
-				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y"},
-				Columns: []string{"time", "f1", "f2", "other", "t3", "value"},
+				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "other", "value"},
 				Values: [][]interface{}{
 					{
 						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
 						12.0,
 						13.5,
 						56.0,
-						"why",
 						1.0,
 					},
 				},
