@@ -1,6 +1,8 @@
 package sideload_test
 
 import (
+	"fmt"
+	"os"
 	"strconv"
 	"testing"
 
@@ -16,7 +18,11 @@ func NewService() *sideload.Service {
 func TestService_Source_Lookup(t *testing.T) {
 	s := NewService()
 
-	src, err := s.Source("testdata/src0")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := s.Source(fmt.Sprintf("file://%s/testdata/src0", wd))
 	if err != nil {
 		t.Fatal(err)
 	}

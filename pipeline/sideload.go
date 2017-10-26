@@ -1,16 +1,17 @@
 package pipeline
 
-// Sideload adds data to points based on hierarchical data from various sources.
-// Sideload behaves similarly to the DefaultNode but loads values from external sources using a hierarchy.
+// Sideload adds fields and tags to points based on hierarchical data from various sources.
 //
 // Example:
 //        |sideload()
 //             .source('file:///path/to/dir')
-//             .order('host/{host}.yml', 'hostgroup/{hostgroup}.yml', default.yml'
-//             .field('cpu_threshold')
-//             .tag('foo')
+//             .order('host/{{.host}}.yml', 'hostgroup/{{.hostgroup}}.yml')
+//             .field('cpu_threshold', 0.0)
+//             .tag('foo', 'unknown')
 //
 // Add a field `cpu_threshold` and a tag `foo` to each point based on the value loaded from the hierarchical source.
+// The list of templates in the `.order()` property are evaluated using the points tags.
+// The files paths are checked then checked in order for the specified keys and the first value that is found is used.
 type SideloadNode struct {
 	chainnode
 
@@ -40,7 +41,8 @@ func newSideloadNode(wants EdgeType) *SideloadNode {
 }
 
 // Order is a list of paths that indicate the hierarchical order.
-// The paths are relative to the source and can have `{}` that will be replaced with the tag value from the point.
+// The paths are relative to the source and can have template markers like `{{.tagname}}` that will be replaced with the tag value of the point.
+// The paths are then searched in order for the keys and the first value that is found is used.
 // This allows for values to be overridden based on a hierarchy of tags.
 // tick:property
 func (n *SideloadNode) Order(order ...string) *SideloadNode {
@@ -58,6 +60,7 @@ func (n *SideloadNode) Field(f string, v interface{}) *SideloadNode {
 }
 
 // Tag is the name of a tag to load from the source and its default value.
+// The loaded values must be strings, otherwise an error is recorded and the default value is used.
 // tick:property
 func (n *SideloadNode) Tag(t string, v string) *SideloadNode {
 	n.Tags[t] = v

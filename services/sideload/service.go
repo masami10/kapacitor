@@ -2,8 +2,10 @@ package sideload
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -69,7 +71,7 @@ func (s *Service) handleReload(w http.ResponseWriter, r *http.Request) {
 		httpd.HttpError(w, err.Error(), true, http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) Reload() error {
@@ -83,8 +85,18 @@ func (s *Service) Reload() error {
 	return nil
 }
 
-func (s *Service) Source(dir string) (Source, error) {
-	dir = filepath.Clean(dir)
+func (s *Service) Source(srcURL string) (Source, error) {
+	u, err := url.Parse(srcURL)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "file" {
+		return nil, fmt.Errorf("unsupported source scheme %q, must be 'file'", u.Scheme)
+	}
+	if !filepath.IsAbs(u.Path) {
+		return nil, fmt.Errorf("sideload source path must be absolute %q", u.Path)
+	}
+	dir := filepath.Clean(u.Path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

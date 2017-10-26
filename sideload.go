@@ -2,8 +2,6 @@ package kapacitor
 
 import (
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"strconv"
 	"text/template"
 	text "text/template"
@@ -28,7 +26,7 @@ type SideloadNode struct {
 	bufferPool *bufpool.Pool
 }
 
-// Create a new  SideloadNode which shifts points and batches in time.
+// Create a new SideloadNode which loads fields and tags from external sources.
 func newSideloadNode(et *ExecutingTask, n *pipeline.SideloadNode, d NodeDiagnostic) (*SideloadNode, error) {
 	sn := &SideloadNode{
 		node:       node{Node: n, et: et, diag: d},
@@ -37,17 +35,7 @@ func newSideloadNode(et *ExecutingTask, n *pipeline.SideloadNode, d NodeDiagnost
 		order:      make([]string, len(n.OrderList)),
 		orderTmpls: make([]orderTmpl, len(n.OrderList)),
 	}
-	u, err := url.Parse(n.Source)
-	if err != nil {
-		return nil, err
-	}
-	if u.Scheme != "file" {
-		return nil, fmt.Errorf("unsupported source scheme %q, must be 'file'", u.Scheme)
-	}
-	if !filepath.IsAbs(u.Path) {
-		return nil, fmt.Errorf("sideload source path must be absolute %q", u.Path)
-	}
-	src, err := et.tm.SideloadService.Source(u.Path)
+	src, err := et.tm.SideloadService.Source(n.Source)
 	if err != nil {
 		return nil, err
 	}
