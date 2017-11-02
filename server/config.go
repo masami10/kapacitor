@@ -38,6 +38,7 @@ import (
 	"github.com/masami10/kapacitor/services/sensu"
 	"github.com/masami10/kapacitor/services/serverset"
 	"github.com/masami10/kapacitor/services/slack"
+	"github.com/masami10/kapacitor/services/dingding"
 	"github.com/masami10/kapacitor/services/smtp"
 	"github.com/masami10/kapacitor/services/snmptrap"
 	"github.com/masami10/kapacitor/services/static_discovery"
@@ -83,6 +84,7 @@ type Config struct {
 	SNMPTrap  snmptrap.Config  `toml:"snmptrap" override:"snmptrap"`
 	Sensu     sensu.Config     `toml:"sensu" override:"sensu"`
 	Slack     slack.Config     `toml:"slack" override:"slack"`
+	Dingding  dingding.Config	`toml:"dingding" override:"dingding"`
 	Talk      talk.Config      `toml:"talk" override:"talk"`
 	Telegram  telegram.Config  `toml:"telegram" override:"telegram"`
 	VictorOps victorops.Config `toml:"victorops" override:"victorops"`
@@ -144,6 +146,7 @@ func NewConfig() *Config {
 	c.SMTP = smtp.NewConfig()
 	c.Sensu = sensu.NewConfig()
 	c.Slack = slack.NewConfig()
+	c.Dingding = dingding.NewConfig()
 	c.Talk = talk.NewConfig()
 	c.SNMPTrap = snmptrap.NewConfig()
 	c.Telegram = telegram.NewConfig()
@@ -266,6 +269,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Slack.Validate(); err != nil {
+		return err
+	}
+	if err := c.Dingding.Validate(); err != nil {
 		return err
 	}
 	if err := c.Talk.Validate(); err != nil {

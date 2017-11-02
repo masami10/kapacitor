@@ -331,6 +331,10 @@ type AlertNode struct {
 	// tick:ignore
 	SlackHandlers []*SlackHandler `tick:"Slack"`
 
+	// Send alert to DingDing.
+	// tick:ignore
+	DingDingHandlers []*DingDingHandler `tick:"Dingding"`
+
 	// Send alert to Telegram.
 	// tick:ignore
 	TelegramHandlers []*TelegramHandler `tick:"Telegram"`
@@ -1204,6 +1208,28 @@ type SlackHandler struct {
 	// IconEmoji is an emoji name surrounded in ':' characters.
 	// The emoji image will replace the normal user icon for the slack bot.
 	IconEmoji string
+}
+
+func (a *AlertNode) Dingding() *DingDingHandler {
+	dingding := &DingDingHandler{
+		AlertNode: a,
+	}
+	a.DingDingHandlers = append(a.DingDingHandlers, dingding)
+	return dingding
+}
+
+// tick:embedded:AlertNode.Slack
+type DingDingHandler struct {
+	*AlertNode
+
+	// access-token
+	// If empty uses the access-token from the configuration.
+	AccessToken string
+
+	// at-people-on-mobile
+	// If empty uses the at-people-on-mobile from the configuration.
+	AtPeopleOnMobile string
+
 }
 
 // Send the alert to Telegram.

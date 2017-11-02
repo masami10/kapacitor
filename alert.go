@@ -23,6 +23,7 @@ import (
 	"github.com/masami10/kapacitor/services/pushover"
 	"github.com/masami10/kapacitor/services/sensu"
 	"github.com/masami10/kapacitor/services/slack"
+	"github.com/masami10/kapacitor/services/dingding"
 	"github.com/masami10/kapacitor/services/smtp"
 	"github.com/masami10/kapacitor/services/snmptrap"
 	"github.com/masami10/kapacitor/services/telegram"
@@ -236,6 +237,25 @@ func newAlertNode(et *ExecutingTask, n *pipeline.AlertNode, l *log.Logger) (an *
 	if et.tm.SlackService != nil &&
 		et.tm.SlackService.Global() &&
 		et.tm.SlackService.StateChangesOnly() {
+		n.IsStateChangesOnly = true
+	}
+
+	for _, s := range n.DingDingHandlers {
+		c := dingding.HandlerConfig{
+			AtPeopleOnMobile:   s.AtPeopleOnMobile,
+			AccessToken:		s.AccessToken,
+		}
+		h := et.tm.DingDingService.Handler(c, l)
+		an.handlers = append(an.handlers, h)
+	}
+	if len(n.DingDingHandlers) == 0 && (et.tm.DingDingService != nil && et.tm.DingDingService.Global()) {
+		h := et.tm.DingDingService.Handler(dingding.HandlerConfig{}, l)
+		an.handlers = append(an.handlers, h)
+	}
+	// If dingding has been configured with state changes only set it.
+	if et.tm.DingDingService != nil &&
+		et.tm.DingDingService.Global() &&
+		et.tm.DingDingService.StateChangesOnly() {
 		n.IsStateChangesOnly = true
 	}
 

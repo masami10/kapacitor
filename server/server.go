@@ -64,6 +64,7 @@ import (
 	"github.com/masami10/kapacitor/uuid"
 	"github.com/masami10/kapacitor/vars"
 	"github.com/pkg/errors"
+	"github.com/masami10/kapacitor/services/dingding"
 )
 
 const clusterIDFilename = "cluster.id"
@@ -208,6 +209,9 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	s.appendTelegramService()
 	if err := s.appendSlackService(); err != nil {
 		return nil, errors.Wrap(err, "slack service")
+	}
+	if err := s.appendDingdingService(); err != nil {
+		return nil, errors.Wrap(err, "dingding service")
 	}
 	s.appendSNMPTrapService()
 	s.appendSensuService()
@@ -530,6 +534,22 @@ func (s *Server) appendSlackService() error {
 
 	s.SetDynamicService("slack", srv)
 	s.AppendService("slack", srv)
+	return nil
+}
+
+func (s *Server) appendDingdingService() error {
+	c := s.config.Dingding
+	l := s.LogService.NewLogger("[dingding] ", log.LstdFlags)
+	srv, err := dingding.NewService(c, l)
+	if err != nil {
+		return err
+	}
+
+	s.TaskMaster.DingDingService = srv
+	s.AlertService.DingDingService = srv
+
+	s.SetDynamicService("dingding", srv)
+	s.AppendService("dingding", srv)
 	return nil
 }
 

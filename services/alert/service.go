@@ -26,6 +26,7 @@ import (
 	"github.com/masami10/kapacitor/services/victorops"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
+	"github.com/masami10/kapacitor/services/dingding"
 )
 
 type Service struct {
@@ -82,6 +83,9 @@ type Service struct {
 	}
 	SlackService interface {
 		Handler(slack.HandlerConfig, *log.Logger) alert.Handler
+	}
+	DingDingService interface {
+		Handler(dingding.HandlerConfig, *log.Logger) alert.Handler
 	}
 	SMTPService interface {
 		Handler(smtp.HandlerConfig, *log.Logger) alert.Handler
@@ -791,6 +795,14 @@ func (s *Service) createHandlerFromSpec(spec HandlerSpec) (handler, error) {
 			return handler{}, err
 		}
 		h = s.SlackService.Handler(c, s.logger)
+		h = newExternalHandler(h)
+	case "dingding":
+		c := dingding.HandlerConfig{}
+		err = decodeOptions(spec.Options, &c)
+		if err != nil {
+			return handler{}, err
+		}
+		h = s.DingDingService.Handler(c, s.logger)
 		h = newExternalHandler(h)
 	case "smtp":
 		c := smtp.HandlerConfig{}

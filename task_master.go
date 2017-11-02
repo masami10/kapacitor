@@ -25,6 +25,7 @@ import (
 	"github.com/masami10/kapacitor/services/pushover"
 	"github.com/masami10/kapacitor/services/sensu"
 	"github.com/masami10/kapacitor/services/slack"
+	"github.com/masami10/kapacitor/services/dingding"
 	"github.com/masami10/kapacitor/services/smtp"
 	"github.com/masami10/kapacitor/services/snmptrap"
 	"github.com/masami10/kapacitor/services/telegram"
@@ -111,6 +112,11 @@ type TaskMaster struct {
 		Global() bool
 		StateChangesOnly() bool
 		Handler(slack.HandlerConfig, *log.Logger) alert.Handler
+	}
+	DingDingService interface {
+		Global() bool
+		StateChangesOnly() bool
+		Handler(dingding.HandlerConfig, *log.Logger) alert.Handler
 	}
 	SNMPTrapService interface {
 		Handler(snmptrap.HandlerConfig, *log.Logger) (alert.Handler, error)
