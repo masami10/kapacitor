@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/influxdata/kapacitor/bufpool"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
-	"github.com/influxdata/kapacitor/services/httppost"
+	"github.com/masami10/kapacitor/bufpool"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/services/httppost"
 )
 
 type HTTPPostNode struct {

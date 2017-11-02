@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/boltdb/bolt"
-	"github.com/influxdata/kapacitor/services/storage"
+	"github.com/masami10/kapacitor/services/storage"
 	"github.com/pkg/errors"
 )
 

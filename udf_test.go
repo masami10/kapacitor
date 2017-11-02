@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/kapacitor"
-	"github.com/influxdata/kapacitor/command"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/udf"
-	"github.com/influxdata/kapacitor/udf/agent"
-	udf_test "github.com/influxdata/kapacitor/udf/test"
+	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/command"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/udf"
+	"github.com/masami10/kapacitor/udf/agent"
+	udf_test "github.com/masami10/kapacitor/udf/test"
 )
 
 func newUDFSocket(name string) (*kapacitor.UDFSocket, *udf_test.IO) {

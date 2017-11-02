@@ -19,14 +19,14 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/influxql"
-	"github.com/influxdata/kapacitor"
-	kclient "github.com/influxdata/kapacitor/client/v1"
-	"github.com/influxdata/kapacitor/clock"
-	"github.com/influxdata/kapacitor/influxdb"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/services/httpd"
-	"github.com/influxdata/kapacitor/services/storage"
-	"github.com/influxdata/kapacitor/uuid"
+	"github.com/masami10/kapacitor"
+	kclient "github.com/masami10/kapacitor/client/v1"
+	"github.com/masami10/kapacitor/clock"
+	"github.com/masami10/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/services/storage"
+	"github.com/masami10/kapacitor/uuid"
 	"github.com/pkg/errors"
 )
 

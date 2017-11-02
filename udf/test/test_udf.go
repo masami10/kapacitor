@@ -5,8 +5,8 @@ import (
 	"io"
 	"log"
 
-	"github.com/influxdata/kapacitor/udf"
-	"github.com/influxdata/kapacitor/udf/agent"
+	"github.com/masami10/kapacitor/udf"
+	"github.com/masami10/kapacitor/udf/agent"
 )
 
 // IO implements a UDF process communication.

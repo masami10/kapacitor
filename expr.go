@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/tick/ast"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 // EvalPredicate - Evaluate a given expression as a boolean predicate against a set of fields and tags

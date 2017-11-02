@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	jsonpatch "github.com/evanphx/json-patch"
-	"github.com/influxdata/kapacitor/alert"
-	client "github.com/influxdata/kapacitor/client/v1"
-	"github.com/influxdata/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/alert"
+	client "github.com/masami10/kapacitor/client/v1"
+	"github.com/masami10/kapacitor/services/httpd"
 )
 
 const (

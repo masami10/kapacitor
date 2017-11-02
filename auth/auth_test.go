@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/influxdata/kapacitor/auth"
+	"github.com/masami10/kapacitor/auth"
 )
 
 func Test_Privilege_String(t *testing.T) {

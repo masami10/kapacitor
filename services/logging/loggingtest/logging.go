@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/influxdata/kapacitor/services/logging"
+	"github.com/masami10/kapacitor/services/logging"
 	"github.com/influxdata/wlog"
 )
 

@@ -8,8 +8,8 @@ import (
 	"sync"
 
 	"github.com/influxdata/influxdb/models"
-	"github.com/influxdata/kapacitor/expvar"
-	"github.com/influxdata/kapacitor/vars"
+	"github.com/masami10/kapacitor/expvar"
+	"github.com/masami10/kapacitor/vars"
 )
 
 const (

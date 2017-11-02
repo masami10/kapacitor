@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/influxdata/kapacitor/alert"
+	"github.com/masami10/kapacitor/alert"
 
 	"gopkg.in/gomail.v2"
 )

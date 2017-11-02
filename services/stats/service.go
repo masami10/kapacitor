@@ -27,10 +27,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/timer"
-	"github.com/influxdata/kapacitor/vars"
+	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/timer"
+	"github.com/masami10/kapacitor/vars"
 )
 
 // Sends internal stats back into the Kapacitor stream.

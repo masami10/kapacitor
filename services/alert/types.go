@@ -1,6 +1,6 @@
 package alert
 
-import "github.com/influxdata/kapacitor/alert"
+import "github.com/masami10/kapacitor/alert"
 
 // HandlerSpecRegistrar is responsible for registering and persisting handler spec definitions.
 type HandlerSpecRegistrar interface {

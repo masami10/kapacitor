@@ -24,10 +24,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/influxdata/kapacitor"
-	"github.com/influxdata/kapacitor/services/httpd"
-	"github.com/influxdata/kapacitor/services/logging/loggingtest"
-	"github.com/influxdata/kapacitor/services/noauth"
+	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/services/logging/loggingtest"
+	"github.com/masami10/kapacitor/services/noauth"
 )
 
 const (

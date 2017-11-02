@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	kexpvar "github.com/influxdata/kapacitor/expvar"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
-	"github.com/influxdata/kapacitor/timer"
-	"github.com/influxdata/kapacitor/vars"
+	kexpvar "github.com/masami10/kapacitor/expvar"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/timer"
+	"github.com/masami10/kapacitor/vars"
 	"github.com/pkg/errors"
 )
 

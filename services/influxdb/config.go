@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/toml"
-	"github.com/influxdata/kapacitor/services/stats"
-	"github.com/influxdata/kapacitor/services/udp"
+	"github.com/masami10/kapacitor/services/stats"
+	"github.com/masami10/kapacitor/services/udp"
 )
 
 const (

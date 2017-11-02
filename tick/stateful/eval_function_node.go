@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 )
 
 type EvalFunctionNode struct {

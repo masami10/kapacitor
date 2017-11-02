@@ -14,8 +14,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/influxdata/kapacitor/tick/ast"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 var mu sync.Mutex

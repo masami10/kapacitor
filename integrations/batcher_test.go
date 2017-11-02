@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/kapacitor"
-	"github.com/influxdata/kapacitor/alert"
-	"github.com/influxdata/kapacitor/clock"
-	"github.com/influxdata/kapacitor/models"
-	alertservice "github.com/influxdata/kapacitor/services/alert"
-	"github.com/influxdata/kapacitor/services/httppost"
-	"github.com/influxdata/kapacitor/services/storage/storagetest"
+	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/clock"
+	"github.com/masami10/kapacitor/models"
+	alertservice "github.com/masami10/kapacitor/services/alert"
+	"github.com/masami10/kapacitor/services/httppost"
+	"github.com/masami10/kapacitor/services/storage/storagetest"
 	"github.com/influxdata/wlog"
 )
 

@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/pipeline"
 )
 
 type ShiftNode struct {

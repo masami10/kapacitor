@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor"
-	"github.com/influxdata/kapacitor/command"
-	"github.com/influxdata/kapacitor/udf"
+	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/command"
+	"github.com/masami10/kapacitor/udf"
 )
 
 type Service struct {

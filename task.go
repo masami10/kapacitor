@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/pipeline"
 )
 
 // The type of a task

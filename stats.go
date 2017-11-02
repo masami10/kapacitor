@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
 )
 
 type StatsNode struct {

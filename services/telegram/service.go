@@ -12,7 +12,7 @@ import (
 	"path"
 	"sync/atomic"
 
-	"github.com/influxdata/kapacitor/alert"
+	"github.com/masami10/kapacitor/alert"
 	"github.com/pkg/errors"
 	"strings"
 )

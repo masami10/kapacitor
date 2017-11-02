@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor/expvar"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
-	"github.com/influxdata/kapacitor/tick/ast"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/expvar"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 type EvalNode struct {

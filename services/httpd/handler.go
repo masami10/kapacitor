@@ -19,9 +19,9 @@ import (
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/uuid"
-	"github.com/influxdata/kapacitor/auth"
-	"github.com/influxdata/kapacitor/client/v1"
-	"github.com/influxdata/kapacitor/services/logging"
+	"github.com/masami10/kapacitor/auth"
+	"github.com/masami10/kapacitor/client/v1"
+	"github.com/masami10/kapacitor/services/logging"
 	"github.com/influxdata/wlog"
 )
 

@@ -1,6 +1,6 @@
 package pipeline
 
-import "github.com/influxdata/kapacitor/tick/ast"
+import "github.com/masami10/kapacitor/tick/ast"
 
 // The WhereNode filters the data stream by a given expression.
 //

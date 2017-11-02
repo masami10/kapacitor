@@ -1,8 +1,8 @@
 package kapacitor
 
 import (
-	"github.com/influxdata/kapacitor/pipeline"
-	"github.com/influxdata/kapacitor/tick"
+	"github.com/masami10/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/tick"
 )
 
 type Template struct {

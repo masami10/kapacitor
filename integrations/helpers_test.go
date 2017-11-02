@@ -9,13 +9,13 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/influxdata/kapacitor"
-	"github.com/influxdata/kapacitor/alert"
-	"github.com/influxdata/kapacitor/influxdb"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/services/httpd"
-	k8s "github.com/influxdata/kapacitor/services/k8s/client"
-	"github.com/influxdata/kapacitor/udf"
+	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/services/httpd"
+	k8s "github.com/masami10/kapacitor/services/k8s/client"
+	"github.com/masami10/kapacitor/udf"
 )
 
 func newHTTPDService() *httpd.Service {

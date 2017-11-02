@@ -3,7 +3,7 @@ package kapacitor
 import (
 	"log"
 
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/pipeline"
 )
 
 type NoOpNode struct {

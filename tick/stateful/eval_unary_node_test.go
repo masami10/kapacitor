@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/kapacitor/tick/ast"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 func TestEvalUnaryNode_InvalidOperator(t *testing.T) {

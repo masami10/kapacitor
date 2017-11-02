@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 )
 
 type EvalStringNode struct {

@@ -3,7 +3,7 @@ package noauth
 import (
 	"log"
 
-	"github.com/influxdata/kapacitor/auth"
+	"github.com/masami10/kapacitor/auth"
 )
 
 // Provide an implentation of an Authentication service.

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/influxql"
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 	"github.com/pkg/errors"
 )
 

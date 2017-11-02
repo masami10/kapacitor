@@ -8,9 +8,9 @@ import (
 	"os"
 	"sync"
 
-	"github.com/influxdata/kapacitor/alert"
-	"github.com/influxdata/kapacitor/command"
-	"github.com/influxdata/kapacitor/command/commandtest"
+	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/command"
+	"github.com/masami10/kapacitor/command/commandtest"
 )
 
 type Log struct {

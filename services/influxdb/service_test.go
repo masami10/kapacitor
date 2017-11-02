@@ -14,11 +14,11 @@ import (
 
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
-	influxcli "github.com/influxdata/kapacitor/influxdb"
-	"github.com/influxdata/kapacitor/services/httpd"
-	"github.com/influxdata/kapacitor/services/influxdb"
-	"github.com/influxdata/kapacitor/uuid"
-	"github.com/influxdata/kapacitor/vars"
+	influxcli "github.com/masami10/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/services/influxdb"
+	"github.com/masami10/kapacitor/uuid"
+	"github.com/masami10/kapacitor/vars"
 )
 
 var ls = logSerivce{}

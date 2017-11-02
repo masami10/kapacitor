@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff"
-	"github.com/influxdata/kapacitor/command"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
-	"github.com/influxdata/kapacitor/udf"
-	"github.com/influxdata/kapacitor/udf/agent"
+	"github.com/masami10/kapacitor/command"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/udf"
+	"github.com/masami10/kapacitor/udf/agent"
 	"github.com/pkg/errors"
 )
 

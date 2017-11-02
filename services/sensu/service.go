@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	text "text/template"
 
-	"github.com/influxdata/kapacitor/alert"
+	"github.com/masami10/kapacitor/alert"
 )
 
 type Service struct {

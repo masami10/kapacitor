@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 )
 
 // Expression is interface that describe expression with state and

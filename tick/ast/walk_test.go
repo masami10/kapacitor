@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 )
 
 func TestWalk(t *testing.T) {

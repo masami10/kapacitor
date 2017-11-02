@@ -13,11 +13,11 @@ import (
 	text "text/template"
 	"time"
 
-	"github.com/influxdata/kapacitor/alert"
-	"github.com/influxdata/kapacitor/bufpool"
-	"github.com/influxdata/kapacitor/command"
-	"github.com/influxdata/kapacitor/tick/ast"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/bufpool"
+	"github.com/masami10/kapacitor/command"
+	"github.com/masami10/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/stateful"
 	"github.com/pkg/errors"
 )
 

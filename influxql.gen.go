@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/influxql"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
 )
 
 type floatPointAggregator struct {

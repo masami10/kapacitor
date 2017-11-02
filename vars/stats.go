@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"runtime"
 
-	kexpvar "github.com/influxdata/kapacitor/expvar"
-	"github.com/influxdata/kapacitor/uuid"
+	kexpvar "github.com/masami10/kapacitor/expvar"
+	"github.com/masami10/kapacitor/uuid"
 )
 
 var (

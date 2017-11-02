@@ -6,8 +6,8 @@ import (
 	"io/ioutil"
 	"net/url"
 
-	"github.com/influxdata/kapacitor/listmap"
-	"github.com/influxdata/kapacitor/services/k8s/client"
+	"github.com/masami10/kapacitor/listmap"
+	"github.com/masami10/kapacitor/services/k8s/client"
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/config"
 )

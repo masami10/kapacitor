@@ -3,7 +3,7 @@ package pipeline
 import (
 	"time"
 
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 )
 
 // Compute the duration of a given state.

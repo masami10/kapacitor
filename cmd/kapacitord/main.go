@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/influxdata/kapacitor/cmd/kapacitord/help"
-	"github.com/influxdata/kapacitor/cmd/kapacitord/run"
+	"github.com/masami10/kapacitor/cmd/kapacitord/help"
+	"github.com/masami10/kapacitor/cmd/kapacitord/run"
 	"github.com/influxdata/wlog"
 )
 

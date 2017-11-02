@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/influxdata/kapacitor/services/storage"
+	"github.com/masami10/kapacitor/services/storage"
 )
 
 var (

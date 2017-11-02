@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/kapacitor/tick"
-	"github.com/influxdata/kapacitor/tick/ast"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/tick"
+	"github.com/masami10/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 //Test structure for evaluating a DSL

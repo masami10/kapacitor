@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/influxdata/kapacitor/expvar"
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/expvar"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/pipeline"
 )
 
 const (

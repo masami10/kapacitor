@@ -3,7 +3,7 @@ package tick
 import (
 	"fmt"
 
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 type Process struct {

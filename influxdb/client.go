@@ -541,7 +541,7 @@ func (p Point) Bytes(precision string) []byte {
 	return bytes
 }
 
-// Simple type to create github.com/influxdata/kapacitor/influxdb clients.
+// Simple type to create github.com/masami10/kapacitor/influxdb clients.
 type ClientCreator struct{}
 
 func (ClientCreator) Create(config Config) (ClientUpdater, error) {

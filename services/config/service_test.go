@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/influxdata/kapacitor/client/v1"
-	"github.com/influxdata/kapacitor/services/config"
-	"github.com/influxdata/kapacitor/services/httpd"
-	"github.com/influxdata/kapacitor/services/httpd/httpdtest"
-	"github.com/influxdata/kapacitor/services/storage/storagetest"
+	client "github.com/masami10/kapacitor/client/v1"
+	"github.com/masami10/kapacitor/services/config"
+	"github.com/masami10/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/services/httpd/httpdtest"
+	"github.com/masami10/kapacitor/services/storage/storagetest"
 )
 
 type SectionA struct {

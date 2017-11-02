@@ -16,10 +16,10 @@ import (
 	"time"
 
 	iclient "github.com/influxdata/influxdb/client/v2"
-	"github.com/influxdata/kapacitor/client/v1"
-	"github.com/influxdata/kapacitor/server"
-	"github.com/influxdata/kapacitor/services/logging"
-	"github.com/influxdata/kapacitor/services/logging/loggingtest"
+	"github.com/masami10/kapacitor/client/v1"
+	"github.com/masami10/kapacitor/server"
+	"github.com/masami10/kapacitor/services/logging"
+	"github.com/masami10/kapacitor/services/logging/loggingtest"
 	"github.com/influxdata/wlog"
 )
 

@@ -22,10 +22,10 @@ import (
 	"github.com/cenkalti/backoff"
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
-	"github.com/influxdata/kapacitor/influxdb"
-	"github.com/influxdata/kapacitor/services/httpd"
-	"github.com/influxdata/kapacitor/services/udp"
-	"github.com/influxdata/kapacitor/vars"
+	"github.com/masami10/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/services/udp"
+	"github.com/masami10/kapacitor/vars"
 	"github.com/pkg/errors"
 )
 

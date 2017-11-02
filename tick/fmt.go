@@ -1,6 +1,6 @@
 package tick
 
-import "github.com/influxdata/kapacitor/tick/ast"
+import "github.com/masami10/kapacitor/tick/ast"
 
 // Formats a TICKscript according to the standard.
 func Format(script string) (string, error) {

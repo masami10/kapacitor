@@ -8,8 +8,8 @@ import (
 	"time"
 
 	dbmodels "github.com/influxdata/influxdb/models"
-	"github.com/influxdata/kapacitor/clock"
-	"github.com/influxdata/kapacitor/models"
+	"github.com/masami10/kapacitor/clock"
+	"github.com/masami10/kapacitor/models"
 )
 
 // Replay stream data from a channel source.

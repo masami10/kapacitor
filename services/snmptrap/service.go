@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	text "text/template"
 
-	"github.com/influxdata/kapacitor/alert"
+	"github.com/masami10/kapacitor/alert"
 	"github.com/k-sone/snmpgo"
 	"github.com/pkg/errors"
 )

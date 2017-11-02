@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/influxdata/kapacitor/tick/ast"
+	"github.com/masami10/kapacitor/tick/ast"
 )
 
 type DynamicMethod func(self interface{}, args ...interface{}) (interface{}, error)

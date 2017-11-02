@@ -1,4 +1,4 @@
-package slack
+package dingding
 
 import (
 	"bytes"
@@ -14,7 +14,10 @@ import (
 
 	"github.com/masami10/kapacitor/alert"
 	"github.com/pkg/errors"
+	"strings"
 )
+
+const DefaultUrl = "https://oapi.dingtalk.com/robot/send?access_token="
 
 type Service struct {
 	configValue atomic.Value
@@ -29,7 +32,7 @@ func NewService(c Config, l *log.Logger) (*Service, error) {
 		return nil, err
 	}
 	if tlsConfig.InsecureSkipVerify {
-		l.Println("W! Slack service is configured to skip ssl verification")
+		l.Println("W! dingding service is configured to skip ssl verification")
 	}
 	s := &Service{
 		logger: l,
@@ -68,7 +71,7 @@ func (s *Service) Update(newConfig []interface{}) error {
 			return err
 		}
 		if tlsConfig.InsecureSkipVerify {
-			s.logger.Println("W! Slack service is configured to skip ssl verification")
+			s.logger.Println("W! dingding service is configured to skip ssl verification")
 		}
 		s.configValue.Store(c)
 		s.clientValue.Store(&http.Client{
@@ -91,12 +94,15 @@ func (s *Service) StateChangesOnly() bool {
 	return c.StateChangesOnly
 }
 
-// slack attachment info
-type attachment struct {
-	Fallback  string   `json:"fallback"`
-	Color     string   `json:"color"`
-	Text      string   `json:"text"`
-	Mrkdwn_in []string `json:"mrkdwn_in"`
+// dingding message type
+type messageType struct{
+	Content	string	`json:"content"`
+}
+
+// dingding at type
+type atType struct{
+	IsAtAll		bool 		`json:"isAtAll,omitempty"`
+	AtMobiles	[]string	`json:"atMobiles,omitempty"`
 }
 
 type testOptions struct {
@@ -108,10 +114,8 @@ type testOptions struct {
 }
 
 func (s *Service) TestOptions() interface{} {
-	c := s.config()
 	return &testOptions{
-		Channel: c.Channel,
-		Message: "test slack message",
+		Message: "test dingding message",
 		Level:   alert.Critical,
 	}
 }
@@ -121,11 +125,11 @@ func (s *Service) Test(options interface{}) error {
 	if !ok {
 		return fmt.Errorf("unexpected options type %T", options)
 	}
-	return s.Alert(o.Channel, o.Message, o.Username, o.IconEmoji, o.Level)
+	return s.Alert(o.Channel, o.Channel, o.Message, o.Username, o.IconEmoji, o.Level)
 }
 
-func (s *Service) Alert(channel, message, username, iconEmoji string, level alert.Level) error {
-	url, post, err := s.preparePost(channel, message, username, iconEmoji, level)
+func (s *Service) Alert(atPeopleOnMobile string, accessToken string, message, username, iconEmoji string, level alert.Level) error {
+	url, post, err := s.preparePost(atPeopleOnMobile, accessToken, message, username, iconEmoji, level)
 	if err != nil {
 		return err
 	}
@@ -143,7 +147,7 @@ func (s *Service) Alert(channel, message, username, iconEmoji string, level aler
 		type response struct {
 			Error string `json:"error"`
 		}
-		r := &response{Error: fmt.Sprintf("failed to understand Slack response. code: %d content: %s", resp.StatusCode, string(body))}
+		r := &response{Error: fmt.Sprintf("failed to understand dingding response. code: %d content: %s", resp.StatusCode, string(body))}
 		b := bytes.NewReader(body)
 		dec := json.NewDecoder(b)
 		dec.Decode(r)
@@ -152,45 +156,51 @@ func (s *Service) Alert(channel, message, username, iconEmoji string, level aler
 	return nil
 }
 
-func (s *Service) preparePost(channel, message, username, iconEmoji string, level alert.Level) (string, io.Reader, error) {
+func (s *Service) preparePost(atPeopleOnMobile string, accessToken string, message, username, iconEmoji string, level alert.Level) (string, io.Reader, error) {
 	c := s.config()
 
 	if !c.Enabled {
 		return "", nil, errors.New("service is not enabled")
 	}
-	if channel == "" {
-		channel = c.Channel
+
+	if accessToken == "" {
+		if c.AccessToken == "" {
+			return "", nil, errors.New("must specify access-token")
+		}
+		accessToken = c.AccessToken
 	}
-	var color string
-	switch level {
-	case alert.Warning:
-		color = "warning"
-	case alert.Critical:
-		color = "danger"
-	default:
-		color = "good"
-	}
-	a := attachment{
-		Fallback:  message,
-		Text:      message,
-		Color:     color,
-		Mrkdwn_in: []string{"text"},
+
+	a := messageType{
+		Content:  message,
 	}
 	postData := make(map[string]interface{})
-	postData["as_user"] = false
-	postData["channel"] = channel
-	postData["text"] = ""
-	postData["attachments"] = []attachment{a}
+	postData["msgtype"] = "text"
+	postData["text"] = a
 
-	if username == "" {
-		username = c.Username
+	if atPeopleOnMobile == "" {
+		atPeopleOnMobile = c.AtPeopleOnMobile
 	}
-	postData["username"] = username
+	if atPeopleOnMobile != "" {
+		err := validationDingdingAtPeopleOnMobile(atPeopleOnMobile)
+		if err != nil {
+			return "", nil, err
+		}
 
-	if iconEmoji == "" {
-		iconEmoji = c.IconEmoji
+		var b atType
+		if atPeopleOnMobile == "all" {
+			b = atType{
+				IsAtAll:true,
+			}
+		} else {
+			s :=strings.Split(atPeopleOnMobile, ",")
+			b = atType{
+				IsAtAll:false,
+				AtMobiles:s,
+			}
+		}
+		postData["at"] = b
 	}
-	postData["icon_emoji"] = iconEmoji
+
 
 	var post bytes.Buffer
 	enc := json.NewEncoder(&post)
@@ -199,21 +209,16 @@ func (s *Service) preparePost(channel, message, username, iconEmoji string, leve
 		return "", nil, err
 	}
 
-	return c.URL, &post, nil
+	return DefaultUrl + accessToken, &post, nil
 }
 
 type HandlerConfig struct {
-	// Slack channel in which to post messages.
-	// If empty uses the channel from the configuration.
-	Channel string `mapstructure:"channel"`
+	// AtPeopleOnMobile
+	// If empty uses the at-people-on-mobile from the configuration
+	AtPeopleOnMobile string `mapstructure:"at-people-on-mobile"`
 
-	// Username of the Slack bot.
-	// If empty uses the username from the configuration.
-	Username string `mapstructure:"username"`
-
-	// IconEmoji is an emoji name surrounded in ':' characters.
-	// The emoji image will replace the normal user icon for the slack bot.
-	IconEmoji string `mapstructure:"icon-emoji"`
+	// AccessToken
+	AccessToken string `mapstructure:"access-token"`
 }
 
 type handler struct {
@@ -232,13 +237,14 @@ func (s *Service) Handler(c HandlerConfig, l *log.Logger) alert.Handler {
 
 func (h *handler) Handle(event alert.Event) {
 	if err := h.s.Alert(
-		h.c.Channel,
+		h.c.AtPeopleOnMobile,
+		h.c.AccessToken,
 		event.State.Message,
-		h.c.Username,
-		h.c.IconEmoji,
+		"",
+		"",
 		event.State.Level,
 	); err != nil {
-		h.logger.Println("E! failed to send event to Slack", err)
+		h.logger.Println("E! failed to send event to dingding", err)
 	}
 }
 

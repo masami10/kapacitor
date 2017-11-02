@@ -7,7 +7,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/influxdata/kapacitor/pipeline"
+	"github.com/masami10/kapacitor/pipeline"
 	"github.com/influxdata/wlog"
 )
 

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor/services/scraper"
+	"github.com/masami10/kapacitor/services/scraper"
 	"github.com/prometheus/prometheus/config"
 	pzookeeper "github.com/prometheus/prometheus/discovery/zookeeper"
 )

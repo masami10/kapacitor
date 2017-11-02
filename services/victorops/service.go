@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/influxdata/kapacitor/alert"
-	"github.com/influxdata/kapacitor/models"
+	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/models"
 	"github.com/pkg/errors"
 )
 

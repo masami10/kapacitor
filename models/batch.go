@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/influxdata/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/influxdb"
 )
 
 // A point in batch, similar to Point but most information is

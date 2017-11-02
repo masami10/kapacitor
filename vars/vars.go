@@ -4,7 +4,7 @@ import (
 	"expvar"
 	"time"
 
-	kexpvar "github.com/influxdata/kapacitor/expvar"
+	kexpvar "github.com/masami10/kapacitor/expvar"
 )
 
 const (

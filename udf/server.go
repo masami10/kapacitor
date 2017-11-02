@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/udf/agent"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/udf/agent"
 )
 
 var ErrServerStopped = errors.New("server already stopped")

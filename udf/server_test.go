@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/udf"
-	"github.com/influxdata/kapacitor/udf/agent"
-	udf_test "github.com/influxdata/kapacitor/udf/test"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/udf"
+	"github.com/masami10/kapacitor/udf/agent"
+	udf_test "github.com/masami10/kapacitor/udf/test"
 )
 
 func TestUDF_StartStop(t *testing.T) {

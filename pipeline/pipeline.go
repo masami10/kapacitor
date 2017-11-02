@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/influxdata/kapacitor/tick"
-	"github.com/influxdata/kapacitor/tick/stateful"
+	"github.com/masami10/kapacitor/tick"
+	"github.com/masami10/kapacitor/tick/stateful"
 )
 
 // Information relavant to configuring a deadman's swith

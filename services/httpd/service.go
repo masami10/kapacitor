@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/kapacitor/services/logging"
+	"github.com/masami10/kapacitor/services/logging"
 )
 
 type Service struct {

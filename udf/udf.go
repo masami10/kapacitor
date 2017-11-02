@@ -1,8 +1,8 @@
 package udf
 
 import (
-	"github.com/influxdata/kapacitor/models"
-	"github.com/influxdata/kapacitor/udf/agent"
+	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/udf/agent"
 )
 
 // Interface for communicating with a UDF

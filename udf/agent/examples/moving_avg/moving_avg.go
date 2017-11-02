@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/influxdata/kapacitor/udf/agent"
+	"github.com/masami10/kapacitor/udf/agent"
 )
 
 // An Agent.Handler that computes a moving average of the data it receives.

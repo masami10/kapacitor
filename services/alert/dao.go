@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/influxdata/kapacitor/alert"
-	"github.com/influxdata/kapacitor/services/storage"
+	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/services/storage"
 	"github.com/pkg/errors"
 )
 
