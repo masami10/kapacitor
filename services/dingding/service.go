@@ -15,6 +15,7 @@ import (
 	"github.com/masami10/kapacitor/alert"
 	"github.com/pkg/errors"
 	"strings"
+	"time"
 )
 
 const DefaultUrl = "https://oapi.dingtalk.com/robot/send?access_token="
@@ -141,6 +142,7 @@ func (s *Service) Alert(sendType string, atPeopleOnMobile string, accessToken st
 		return err
 	}
 	client := s.clientValue.Load().(*http.Client)
+	client.Timeout = time.Duration(10 * time.Second)
 	resp, err := client.Post(url, "application/json", post)
 	if err != nil {
 		return err
