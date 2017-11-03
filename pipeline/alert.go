@@ -1222,6 +1222,10 @@ func (a *AlertNode) Dingding() *DingDingHandler {
 type DingDingHandler struct {
 	*AlertNode
 
+	// send-type
+	// If empty uses the send-type from the configuration
+	SendType	string
+
 	// access-token
 	// If empty uses the access-token from the configuration.
 	AccessToken string

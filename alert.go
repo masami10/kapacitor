@@ -242,6 +242,7 @@ func newAlertNode(et *ExecutingTask, n *pipeline.AlertNode, l *log.Logger) (an *
 
 	for _, s := range n.DingDingHandlers {
 		c := dingding.HandlerConfig{
+			SendType:			s.SendType,
 			AtPeopleOnMobile:   s.AtPeopleOnMobile,
 			AccessToken:		s.AccessToken,
 		}

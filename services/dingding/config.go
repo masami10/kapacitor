@@ -3,12 +3,15 @@ package dingding
 import (
 	"github.com/pkg/errors"
 	"regexp"
+	"strings"
 )
 
 
 type Config struct {
 	// Whether Dingding integration is enabled.
 	Enabled bool `toml:"enabled" override:"enabled"`
+	// message type
+	SendType	string	`toml:"send-type" override:"send-type"`
 	// access_token
 	AccessToken	string	`toml:"access-token"  override:"access-token"`
 	// The default at people on mobile, can be overridden per alert.
@@ -36,6 +39,7 @@ type Config struct {
 
 func NewConfig() Config {
 	return Config{
+		SendType: DefaultTextType,
 		Enabled: false,
 		Global: false,
 		StateChangesOnly:true,
@@ -45,6 +49,10 @@ func NewConfig() Config {
 
 func (c Config) Validate() error {
 	if c.Enabled{
+		if validationDingdingSendType(c.SendType) != nil {
+			return errors.New("send-type configure error")
+		}
+
 		if validationDingdingAtPeopleOnMobile(c.AtPeopleOnMobile) != nil{
 			return errors.New("at-people-on-mobile configure error")
 		}
@@ -53,7 +61,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// 用户验证用户配置的at-people-on-mobile是否合法的正则表达式
+// 验证用户配置的at-people-on-mobile是否合法的正则表达式
 const pattern =
 	"^(all|((13[0-9]|14[5|7]|15[0|1|2|3|5|6|7|8|9]|18[0|1|2|3|5|6|7|8|9])\\d{8}((,(13[0-9]|14[5|7]|15[0|1|2|3|5|6|7|8|9]|18[0|1|2|3|5|6|7|8|9])\\d{8})*)))$"
 
@@ -65,4 +73,16 @@ func validationDingdingAtPeopleOnMobile(str string) error {
 	}
 
 	return nil
+}
+
+// 验证用户配置的发送类型是否合法
+const DefaultTextType = "text"
+const MarkdownType = "markdown"
+
+func validationDingdingSendType(str string) error {
+	if str == "" || strings.EqualFold(str, DefaultTextType) || strings.EqualFold(str, MarkdownType){
+		return nil
+	}
+
+	return errors.New("")
 }

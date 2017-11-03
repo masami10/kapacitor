@@ -94,9 +94,15 @@ func (s *Service) StateChangesOnly() bool {
 	return c.StateChangesOnly
 }
 
-// dingding message type
-type messageType struct{
+// dingding message text type
+type webhookTextType struct{
 	Content	string	`json:"content"`
+}
+
+// dingding message markdown type
+type webhookMarkdownType struct{
+	Title string 	`json:"title"`
+	Text  string 	`json:"text"`
 }
 
 // dingding at type
@@ -125,11 +131,12 @@ func (s *Service) Test(options interface{}) error {
 	if !ok {
 		return fmt.Errorf("unexpected options type %T", options)
 	}
-	return s.Alert(o.Channel, o.Channel, o.Message, o.Username, o.IconEmoji, o.Level)
+	return s.Alert("text", o.Channel, o.Channel, o.Message, o.Message, o.Level)
 }
 
-func (s *Service) Alert(atPeopleOnMobile string, accessToken string, message, username, iconEmoji string, level alert.Level) error {
-	url, post, err := s.preparePost(atPeopleOnMobile, accessToken, message, username, iconEmoji, level)
+func (s *Service) Alert(sendType string, atPeopleOnMobile string, accessToken string, message string, details string, level alert.Level) error {
+
+	url, post, err := s.preparePost(sendType, atPeopleOnMobile, accessToken, message, details, level)
 	if err != nil {
 		return err
 	}
@@ -156,11 +163,20 @@ func (s *Service) Alert(atPeopleOnMobile string, accessToken string, message, us
 	return nil
 }
 
-func (s *Service) preparePost(atPeopleOnMobile string, accessToken string, message, username, iconEmoji string, level alert.Level) (string, io.Reader, error) {
+func (s *Service) preparePost(sendType string, atPeopleOnMobile string, accessToken string, message string, details string, level alert.Level) (string, io.Reader, error) {
 	c := s.config()
+
+	var a interface{}
 
 	if !c.Enabled {
 		return "", nil, errors.New("service is not enabled")
+	}
+
+	if sendType == "" {
+		sendType = c.SendType
+		if sendType == "" {
+			sendType = DefaultTextType
+		}
 	}
 
 	if accessToken == "" {
@@ -170,12 +186,24 @@ func (s *Service) preparePost(atPeopleOnMobile string, accessToken string, messa
 		accessToken = c.AccessToken
 	}
 
-	a := messageType{
-		Content:  message,
+	switch sendType {
+	case DefaultTextType:
+		a = webhookTextType{
+			Content:message,
+		}
+
+	case MarkdownType:
+		a = webhookMarkdownType{
+			Title:message,
+			Text:details,
+		}
+	default:
+		return "", nil, errors.New("send type error")
 	}
+
 	postData := make(map[string]interface{})
-	postData["msgtype"] = "text"
-	postData["text"] = a
+	postData["msgtype"] = sendType
+	postData[sendType] = a
 
 	if atPeopleOnMobile == "" {
 		atPeopleOnMobile = c.AtPeopleOnMobile
@@ -213,6 +241,10 @@ func (s *Service) preparePost(atPeopleOnMobile string, accessToken string, messa
 }
 
 type HandlerConfig struct {
+	// SendType
+	// If empty uses the send-type from the configuration
+	SendType	string	`mapstructure:"send-type"`
+
 	// AtPeopleOnMobile
 	// If empty uses the at-people-on-mobile from the configuration
 	AtPeopleOnMobile string `mapstructure:"at-people-on-mobile"`
@@ -237,11 +269,11 @@ func (s *Service) Handler(c HandlerConfig, l *log.Logger) alert.Handler {
 
 func (h *handler) Handle(event alert.Event) {
 	if err := h.s.Alert(
+		h.c.SendType,
 		h.c.AtPeopleOnMobile,
 		h.c.AccessToken,
 		event.State.Message,
-		"",
-		"",
+		event.State.Details,
 		event.State.Level,
 	); err != nil {
 		h.logger.Println("E! failed to send event to dingding", err)
