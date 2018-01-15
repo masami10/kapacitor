@@ -36,6 +36,19 @@ const logo = `
 
 `
 
+const (
+	prefixHostnameKey       = "kapacitors/hostname/"
+	prefixHostnameRevKey    = "kapacitors/rev/"
+	prefixTasksIdKey        = "tasks/id/"
+	prefixTasksConfigKey    = "tasks/config/"
+	prefixTasksIsCreatedKey = "tasks/is_created/"
+	prefixTasksInNodeKey    = "tasks/in_node/"
+	prefixTasksStatusKey    = "tasks/status/"
+	totalTaskNumKey  		= "kapacitors/task_num/"
+)
+
+var kcli *client.Client
+
 // Command represents the command executed by "kapacitord run".
 type Command struct {
 	Version string
@@ -151,8 +164,12 @@ func (cmd *Command) Run(args ...string) error {
 	// Begin monitoring the server's error channel.
 	go cmd.monitorServerErrors()
 
-	//go cmd.monitorEtcdKeyChang()
-	go cmd.monitorTaskid(config, cli)
+	// tasks
+	kcli, err = connect( "http://localhost:9092", false)
+	if err != nil {
+		cmd.Logger.Fatal(err)
+	}
+	go cmd.watchTaskid(config, cli)
 
 	return nil
 }
@@ -185,7 +202,8 @@ func (cmd *Command) monitorServerErrors() {
 
 func (cmd *Command) registryToEtcd(c *server.Config, cli *clientv3.Client, kch chan int) {
 	hostName := c.Hostname
-	key := "kapacitors/host_name/" + hostName
+	hostnameKey := prefixHostnameKey + hostName
+	hostnameRevKey := prefixHostnameRevKey + hostName
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1 * time.Second)
 	// grant
@@ -198,12 +216,21 @@ func (cmd *Command) registryToEtcd(c *server.Config, cli *clientv3.Client, kch c
 
 	// put key
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 1 * time.Second)
-	_, err = cli.Put(ctx2, key, hostName, clientv3.WithLease(resp.ID))
+	_, err = cli.Put(ctx2, hostnameKey, hostName, clientv3.WithLease(resp.ID))
 	if err != nil {
 		fmt.Println(err)
 		cmd.Logger.Fatal(err)
 	}
 	cancel2()
+
+	kvc := clientv3.NewKV(cli)
+	_, err = kvc.Txn(context.TODO()).
+		If(clientv3.Compare(clientv3.Value(hostnameKey), "=", hostName)).
+			Then(clientv3.OpPut(hostnameRevKey, "0")).
+				Commit()
+	if err != nil {
+		cmd.Logger.Fatal(err)
+	}
 
 	ch, err := cli.KeepAlive(context.TODO(), resp.ID)
 	if err != nil {
@@ -220,27 +247,75 @@ func (cmd *Command) registryToEtcd(c *server.Config, cli *clientv3.Client, kch c
 }
 
 
-func (cmd *Command) monitorTaskid(c *server.Config, ecli *clientv3.Client){
+func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 	// put delete
 
-	key := "tasks/id/"
-	rch := ecli.Watch(context.Background(), key, clientv3.WithPrefix())
+	rch := cli.Watch(context.Background(), prefixTasksIdKey, clientv3.WithPrefix())
 
 	for wresp := range rch {
 		for _, ev := range wresp.Events {
 			evType := ev.Type.String()
 			if evType == "PUT"{
+				// 计算延迟事务时间
+				// 1. 查询总任务数
+				taskNum := int64(0)
+				resp, err := cli.Get(context.TODO(), totalTaskNumKey)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				for _, ev := range resp.Kvs {
+					if string(ev.Key) == totalTaskNumKey {
+						taskNum, _ = strconv.ParseInt(string(ev.Value), 10, 64)
+					}
+				}
+				// 2. 查询节点数
+				resp, err = cli.Get(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
+				nodeNum := int64(len(resp.Kvs))
+
+				// 3. 查询节点任务数
+				tasksInNodeKey := prefixTasksInNodeKey + c.Hostname
+				resp, err = cli.Get(context.TODO(), tasksInNodeKey, clientv3.WithPrefix())
+				nodeTaskNum := int64(len(resp.Kvs))
+
+				// 4. 计算每个节点应该分配的任务数
+				avgTaskNum := (taskNum + 1) / nodeNum + 1
+
+				// 5. 计算延迟抓取时间
+				diff := nodeTaskNum - avgTaskNum
+
+				delayTime := int64(0)
+				if diff > 0 {
+					delayTime = diff
+				}
+
+				time.Sleep(time.Duration(delayTime * 100) * time.Microsecond)
 				//事务创建任务
 				taskId := string(ev.Kv.Value)
 
+				// 事务修改etcd任务所在节点信息
+				taskIdKey := prefixTasksIdKey + taskId
+				kvc := clientv3.NewKV(cli)
+				kresp, err := kvc.Txn(context.TODO()).
+					If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskId)).
+						Then(clientv3.OpPut(taskIdKey, c.Hostname)).
+							Commit()
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+
+				// 检查事务条件是否成立
+				if kresp.Succeeded == false {
+					continue
+				}
+
 				// 获取任务信息
-				taskConfigKey := "tasks/config/"+ taskId
+				taskConfigKey := prefixTasksConfigKey + taskId
 
 				fmt.Println("6666666666666666666666666666666666666666666666666666666666")
 				fmt.Println(taskConfigKey)
 
 				ctx, cancel := context.WithTimeout(context.Background(), 1 * time.Second)
-				gresp, err := ecli.Get(ctx, taskConfigKey)
+				gresp, err := cli.Get(ctx, taskConfigKey)
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -257,48 +332,52 @@ func (cmd *Command) monitorTaskid(c *server.Config, ecli *clientv3.Client){
 							cmd.Logger.Fatal(err)
 						}
 
-						keyIsCreated := "tasks/is_created/"+ taskId
-						_, err = ecli.Put(context.TODO(), keyIsCreated, "true")
+						//isCreatedKey := prefixTasksIsCreatedKey + taskId
+						//_, err = cli.Put(context.TODO(), isCreatedKey, "true")
+						//if err != nil {
+						//	cmd.Logger.Fatal(err)
+						//}
+						//keyStatus := prefixTasksStatusKey + taskId
+						//_, err = cli.Put(context.TODO(), keyStatus, t.Status.String())
+						//if err != nil {
+						//	cmd.Logger.Fatal(err)
+						//}
+						//
+						//_, err = cli.Put(context.TODO(), tasksInNodeKey + taskId, taskId)
+						//if err != nil {
+						//	cmd.Logger.Fatal(err)
+						//}
+
+						//
+						isCreatedKey := prefixTasksIsCreatedKey + taskId
+						keyStatus := prefixTasksStatusKey + taskId
+						taskIdInNodeKey := tasksInNodeKey + "/" + taskId
+						kvc := clientv3.NewKV(cli)
+						taskIdKey := prefixTasksIdKey + taskId
+						_, err = kvc.Txn(context.TODO()).
+							If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
+								Then(clientv3.OpPut(isCreatedKey, "true"),
+									clientv3.OpPut(keyStatus, t.Status.String()),
+									clientv3.OpPut(taskIdInNodeKey, taskId)).
+								Commit()
 						if err != nil {
 							cmd.Logger.Fatal(err)
 						}
-						keyStatus := "tasks/status/"+ taskId
-						_, err = ecli.Put(context.TODO(), keyStatus, t.Status.String())
 
 						// 把任务数量加一
-						keyTaskNum := "kapacitors/task_num"
-						keyNodeTaskNum := "kapacitors/192.168.7.8/task_num"
+						totalTaskNum := "1"
 
-						taskNum := "1"
-						nodeTaskNum := "1"
-
-						resp, err := ecli.Get(context.TODO(), keyNodeTaskNum)
+						resp, err := cli.Get(context.TODO(), totalTaskNumKey)
 						if err != nil {
 							cmd.Logger.Fatal(err)
 						}
 						for _, ev := range resp.Kvs {
-							if string(ev.Key) == keyNodeTaskNum {
+							if string(ev.Key) == totalTaskNumKey {
 								num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
-								nodeTaskNum = strconv.FormatInt(num+1, 10)
+								totalTaskNum = strconv.FormatInt(num+1, 10)
 							}
 						}
-
-						resp, err = ecli.Get(context.TODO(), keyTaskNum)
-						if err != nil {
-							cmd.Logger.Fatal(err)
-						}
-						for _, ev := range resp.Kvs {
-							if string(ev.Key) == keyTaskNum {
-								num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
-								taskNum = strconv.FormatInt(num+1, 10)
-							}
-						}
-
-						_, err = ecli.Put(context.TODO(), keyNodeTaskNum, nodeTaskNum)
-						if err != nil {
-							cmd.Logger.Fatal(err)
-						}
-						_, err = ecli.Put(context.TODO(), keyTaskNum, taskNum)
+						_, err = cli.Put(context.TODO(), totalTaskNumKey, totalTaskNum)
 						if err != nil {
 							log.Fatal(err)
 						}
@@ -311,6 +390,13 @@ func (cmd *Command) monitorTaskid(c *server.Config, ecli *clientv3.Client){
 			}
 		}
 	}
+}
+
+func connect(url string, skipSSL bool) (*client.Client, error) {
+	return client.New(client.Config{
+		URL:                url,
+		InsecureSkipVerify: skipSSL,
+	})
 }
 
 func createTask(task_config string) (client.Task, error) {
@@ -329,7 +415,7 @@ func createTask(task_config string) (client.Task, error) {
 
 	t := client.Task{}
 
-	_, err = cli.Do(req, &t, http.StatusOK)
+	_, err = kcli.Do(req, &t, http.StatusOK)
 
 	fmt.Println("777777777777777777777777777777777777777777777777777777777777777777")
 
