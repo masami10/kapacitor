@@ -171,6 +171,17 @@ func (cmd *Command) Run(args ...string) error {
 	}
 	go cmd.watchTaskid(config, cli)
 
+	//　watch kapacitor hostname
+	go cmd.watchHostname(config, cli)
+
+	// 查找is_create=false的任务并创建
+	go func() {
+		for {
+			cmd.recreateTasks(config, cli)
+			time.Sleep(3 * time.Second)
+		}
+	}()
+
 	return nil
 }
 
@@ -283,12 +294,18 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 				// 5. 计算延迟抓取时间
 				diff := nodeTaskNum - avgTaskNum
 
+				fmt.Println("6666666666666666666666666666666666666666666666666677777777777777777777777777777777")
+				fmt.Println(nodeTaskNum, avgTaskNum, diff)
+
 				delayTime := int64(0)
 				if diff > 0 {
 					delayTime = diff
 				}
 
-				time.Sleep(time.Duration(delayTime * 100) * time.Microsecond)
+				//time.Sleep(time.Duration(delayTime * 100) * time.Microsecond)
+				time.Sleep(time.Duration(delayTime) * time.Second)
+
+				fmt.Println(delayTime)
 				//事务创建任务
 				taskId := string(ev.Kv.Value)
 
@@ -391,6 +408,182 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 		}
 	}
 }
+
+func (cmd *Command) watchHostname(c *server.Config, cli *clientv3.Client)  {
+	kvc := clientv3.NewKV(cli)
+	rch := cli.Watch(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
+
+	for wresp := range rch {
+		revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
+		for _, ev := range wresp.Events {
+			fmt.Printf("%s %q : %q\n", ev.Type, ev.Kv.Key, ev.Kv.Value)
+			if ev.Type.String() == "DELETE" {
+				downHostname := strings.Split(string(ev.Kv.Key), "/")[2]
+
+				fmt.Println(downHostname, "99999999999999999999999999999")
+
+				downRevKey := prefixHostnameRevKey + downHostname
+
+				// 把is_created设置成false
+
+				var taskIds []string
+				inNodeKey := prefixTasksInNodeKey + downHostname
+				resp, err := cli.Get(context.TODO(), inNodeKey, clientv3.WithPrefix())
+				if err != nil {
+					log.Fatal(err)
+				}
+				for _, ev := range resp.Kvs {
+					taskIds = append(taskIds, string(ev.Value))
+				}
+
+				fmt.Println("3333333333333333333333333333333333333")
+				fmt.Println(taskIds)
+
+				var ops []clientv3.Op
+				for _, id := range taskIds {
+					isCreatedKey := prefixTasksIsCreatedKey+id
+					taskInNodeKey := prefixTasksInNodeKey + downHostname + "/" + id
+
+					ops = append(ops, clientv3.OpPut(isCreatedKey, "false"))
+					ops = append(ops, clientv3.OpDelete(taskInNodeKey))
+				}
+				// 修改rev值
+				ops = append(ops, clientv3.OpPut(downRevKey, revision))
+
+				ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
+				_, err = kvc.Txn(ctx).
+					If(clientv3.Compare(clientv3.Value(downRevKey), "!=", revision)).
+					Then(ops...).
+					Commit()
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				cancel()
+
+			}
+		}
+	}
+}
+
+func (cmd *Command) recreateTasks(c *server.Config, cli *clientv3.Client) {
+	// 把失效节点的任务重新创建
+
+	resp, err := cli.Get(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
+	if err != nil {
+		cmd.Logger.Fatal(err)
+	}
+	kapacitorNum := len(resp.Kvs)
+
+	fmt.Println("kapacitor_num", kapacitorNum)
+	if kapacitorNum == 0 {
+		return
+	}
+
+	// 获取is_created = false 的所有任务id
+	resp, err = cli.Get(context.TODO(), prefixTasksIsCreatedKey, clientv3.WithPrefix())
+	if err != nil {
+		cmd.Logger.Fatal(err)
+	}
+	var taskIds []string
+	for _, ev := range resp.Kvs {
+		if string(ev.Value) != "false" {
+			continue
+		}
+		key := string(ev.Key)
+		id := strings.Split(key, "/")[2]
+		taskIds = append(taskIds, id)
+
+		fmt.Printf("%s = %s\n", ev.Key, ev.Value)
+	}
+	uncreatedTaskNum := len(taskIds)
+
+	avgTaskNum := uncreatedTaskNum/kapacitorNum + 1
+
+	fmt.Println(taskIds)
+	fmt.Println(uncreatedTaskNum, kapacitorNum, avgTaskNum)
+
+	// 事务修改avg_task_num个任务status = processing , 和任务所在的节点
+
+	modifiedTasksNum := 0
+	kvc := clientv3.NewKV(cli)
+	for _, id := range taskIds {
+		if modifiedTasksNum == avgTaskNum {
+			fmt.Println("break 00000000000000000000000000000000000000000000000000000")
+			break
+		}
+		fmt.Println("222222222222222222222222222200000000000000000000000000000000")
+
+		// 查询id所在的节点的域名
+		taskInKpKey := prefixTasksIdKey+id
+		resp, err := cli.Get(context.TODO(), taskInKpKey)
+		if err != nil {
+			log.Fatal(err)
+		}
+		var taskOldHostname string
+		for _, ev := range resp.Kvs {
+			if string(ev.Key) == taskInKpKey {
+				taskOldHostname = string(ev.Value)
+			}
+		}
+
+		fmt.Println(taskInKpKey)
+		fmt.Println(taskOldHostname)
+		fmt.Println("-----222222222222222222223333333333333333333333333333333337777777777777777")
+
+		tresp, err := kvc.Txn(context.TODO()).
+			If(clientv3.Compare(clientv3.Value(taskInKpKey), "=", taskOldHostname), clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+id), "=", "false")).
+			Then(clientv3.OpPut(prefixTasksIsCreatedKey+id, "processing"), clientv3.OpPut(taskInKpKey, c.Hostname)).
+			Commit()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// 检查id所在的节点是否被修改成功
+		if tresp.Succeeded == true {
+			fmt.Println("successed=true", "22222222222222222222222222222222222222222222222222222222")
+			// 创建任务
+			taskConfigKey := prefixTasksConfigKey + id
+			ctx, cancel := context.WithTimeout(context.Background(), 1 * time.Second)
+			gresp, err := cli.Get(ctx, taskConfigKey)
+			if err != nil {
+				log.Fatal(err)
+			}
+			cancel()
+
+			for _, ev := range gresp.Kvs {
+				if string(ev.Key) == taskConfigKey {
+					taskConfig := string(ev.Value)
+
+					_, err = createTask(taskConfig)
+					if err != nil {
+						// 创建任务失败
+						fmt.Println("create task", id, "666666666666666666666666666666666666666666666666666666666")
+						cmd.Logger.Fatal(err)
+					}
+
+					// todo 要改成事务操作
+					_, err := cli.Put(context.TODO(), prefixTasksIsCreatedKey+id, "true")
+					if err != nil {
+						cmd.Logger.Fatal(err)
+					}
+					_, err = cli.Put(context.TODO(), prefixTasksIdKey+id, c.Hostname)
+					if err != nil {
+						cmd.Logger.Fatal(err)
+					}
+					_, err = cli.Put(context.TODO(), prefixTasksInNodeKey+c.Hostname+"/"+id, id)
+					if err != nil {
+						cmd.Logger.Fatal(err)
+					}
+				}
+			}
+			//func () {
+			//	// 创建任务
+			//}()
+		}
+
+	}
+}
+
 
 func connect(url string, skipSSL bool) (*client.Client, error) {
 	return client.New(client.Config{
