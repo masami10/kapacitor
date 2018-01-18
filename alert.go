@@ -32,6 +32,7 @@ import (
 	"github.com/masami10/kapacitor/tick/stateful"
 	"github.com/masami10/kapacitor/vars"
 	"github.com/pkg/errors"
+	"github.com/masami10/kapacitor/services/jiguang"
 )
 
 const (
@@ -374,6 +375,18 @@ func newAlertNode(et *ExecutingTask, n *pipeline.AlertNode, l *log.Logger) (an *
 			c.Sound = p.Sound
 		}
 		h := et.tm.PushoverService.Handler(c, l)
+		an.handlers = append(an.handlers, h)
+	}
+
+	for _, p := range n.JiguangHandlers {
+		c := jiguang.HandlerConfig{}
+		if p.Title != "" {
+			c.Title = p.Title
+		}
+		if p.AtPeopleOnIotseed != "" {
+			c.AtPeopleOnIotseed = p.AtPeopleOnIotseed
+		}
+		h := et.tm.JiguangService.Handler(c, l)
 		an.handlers = append(an.handlers, h)
 	}
 

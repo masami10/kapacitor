@@ -26,6 +26,7 @@ import (
 	"github.com/masami10/kapacitor/services/config"
 	"github.com/masami10/kapacitor/services/consul"
 	"github.com/masami10/kapacitor/services/deadman"
+	"github.com/masami10/kapacitor/services/dingding"
 	"github.com/masami10/kapacitor/services/dns"
 	"github.com/masami10/kapacitor/services/ec2"
 	"github.com/masami10/kapacitor/services/file_discovery"
@@ -34,6 +35,8 @@ import (
 	"github.com/masami10/kapacitor/services/httpd"
 	"github.com/masami10/kapacitor/services/httppost"
 	"github.com/masami10/kapacitor/services/influxdb"
+	"github.com/masami10/kapacitor/services/iotseed"
+	"github.com/masami10/kapacitor/services/jiguang"
 	"github.com/masami10/kapacitor/services/k8s"
 	"github.com/masami10/kapacitor/services/logging"
 	"github.com/masami10/kapacitor/services/marathon"
@@ -64,7 +67,6 @@ import (
 	"github.com/masami10/kapacitor/uuid"
 	"github.com/masami10/kapacitor/vars"
 	"github.com/pkg/errors"
-	"github.com/masami10/kapacitor/services/dingding"
 )
 
 const clusterIDFilename = "cluster.id"
@@ -103,6 +105,7 @@ type Server struct {
 	ConfigOverrideService *config.Service
 	TesterService         *servicetest.Service
 	StatsService          *stats.Service
+	IOTSeedService        *iotseed.Service
 
 	ScraperService *scraper.Service
 
@@ -194,9 +197,13 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	s.appendUDFService()
 	s.appendDeadmanService()
 
+	s.appendIOTSeedService()
+
+
 	if err := s.appendInfluxDBService(); err != nil {
 		return nil, errors.Wrap(err, "influxdb service")
 	}
+
 
 	// Append Alert integration services
 	s.appendAlertaService()
@@ -204,6 +211,7 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	s.appendOpsGenieService()
 	s.appendPagerDutyService()
 	s.appendPushoverService()
+	s.appendJiguangService()
 	s.appendHTTPPostService()
 	s.appendSMTPService()
 	s.appendTelegramService()
@@ -423,6 +431,21 @@ func (s *Server) appendK8sService() error {
 	return nil
 }
 
+func (s *Server) appendIOTSeedService() error {
+	c := s.config.IOTSeed
+	l := s.LogService.NewLogger("[iotseed] ", log.LstdFlags)
+	srv, err := iotseed.NewService(c, l)
+	if err != nil {
+		return err
+	}
+
+	s.IOTSeedService = srv
+
+	s.SetDynamicService("iotseed", srv)
+	s.AppendService("iotseed", srv)
+	return nil
+}
+
 func (s *Server) appendDeadmanService() {
 	l := s.LogService.NewLogger("[deadman] ", log.LstdFlags)
 	srv := deadman.NewService(s.config.Deadman, l)
@@ -552,6 +575,22 @@ func (s *Server) appendDingdingService() error {
 	s.AppendService("dingding", srv)
 	return nil
 }
+
+func (s *Server) appendJiguangService() {
+	c := s.config.Jiguang
+	l := s.LogService.NewLogger("[jiguang] ", log.LstdFlags)
+	srv := jiguang.NewService(c, l)
+
+	s.TaskMaster.JiguangService = srv
+	s.AlertService.JiguangService = srv
+
+	srv.UserinfoService = s.IOTSeedService
+
+	s.SetDynamicService("jiguang", srv)
+	s.AppendService("jiguang", srv)
+}
+
+
 
 func (s *Server) appendSNMPTrapService() {
 	c := s.config.SNMPTrap

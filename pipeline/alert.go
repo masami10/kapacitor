@@ -323,6 +323,10 @@ type AlertNode struct {
 	// tick:ignore
 	PushoverHandlers []*PushoverHandler `tick:"Pushover"`
 
+	// Send alert to Jiguang.
+	// tick:ignore
+	JiguangHandlers []*JiguangHandler `tick:"Jiguang"`
+
 	// Send alert to Sensu.
 	// tick:ignore
 	SensuHandlers []*SensuHandler `tick:"Sensu"`
@@ -1126,6 +1130,27 @@ type PushoverHandler struct {
 	// The name of one of the sounds supported by the device clients to override
 	// the user's default sound choice
 	Sound string
+}
+
+
+func (a *AlertNode) Jiguang() *JiguangHandler {
+	jiguang := &JiguangHandler{
+		AlertNode: a,
+	}
+	a.JiguangHandlers = append(a.JiguangHandlers, jiguang)
+	return jiguang
+}
+
+// tick:embedded:AlertNode.Jiguang
+type JiguangHandler struct {
+	*AlertNode
+
+	// Your message's title, otherwise your apps name is used
+	Title string
+
+	// A supplementary URL to show with your message
+	AtPeopleOnIotseed string
+
 }
 
 // Send the alert to Slack.

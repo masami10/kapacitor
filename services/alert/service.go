@@ -27,6 +27,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/masami10/kapacitor/services/dingding"
+	"github.com/masami10/kapacitor/services/jiguang"
 )
 
 type Service struct {
@@ -74,6 +75,9 @@ type Service struct {
 	}
 	PushoverService interface {
 		Handler(pushover.HandlerConfig, *log.Logger) alert.Handler
+	}
+	JiguangService interface {
+		Handler(jiguang.HandlerConfig, *log.Logger) alert.Handler
 	}
 	HTTPPostService interface {
 		Handler(httppost.HandlerConfig, *log.Logger) alert.Handler
@@ -759,6 +763,14 @@ func (s *Service) createHandlerFromSpec(spec HandlerSpec) (handler, error) {
 			return handler{}, err
 		}
 		h = s.PushoverService.Handler(c, s.logger)
+		h = newExternalHandler(h)
+	case "jiguang":
+		c := jiguang.HandlerConfig{}
+		err = decodeOptions(spec.Options, &c)
+		if err != nil {
+			return handler{}, err
+		}
+		h = s.JiguangService.Handler(c, s.logger)
 		h = newExternalHandler(h)
 	case "post":
 		c := httppost.HandlerConfig{}

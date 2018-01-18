@@ -35,6 +35,7 @@ import (
 	"github.com/masami10/kapacitor/timer"
 	"github.com/masami10/kapacitor/udf"
 	"github.com/masami10/kapacitor/vars"
+	"github.com/masami10/kapacitor/services/jiguang"
 )
 
 const (
@@ -103,6 +104,9 @@ type TaskMaster struct {
 	}
 	PushoverService interface {
 		Handler(pushover.HandlerConfig, *log.Logger) alert.Handler
+	}
+	JiguangService interface {
+		Handler(jiguang.HandlerConfig, *log.Logger) alert.Handler
 	}
 	HTTPPostService interface {
 		Handler(httppost.HandlerConfig, *log.Logger) alert.Handler

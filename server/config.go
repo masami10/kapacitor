@@ -17,6 +17,7 @@ import (
 	"github.com/masami10/kapacitor/services/config"
 	"github.com/masami10/kapacitor/services/consul"
 	"github.com/masami10/kapacitor/services/deadman"
+	"github.com/masami10/kapacitor/services/dingding"
 	"github.com/masami10/kapacitor/services/dns"
 	"github.com/masami10/kapacitor/services/ec2"
 	"github.com/masami10/kapacitor/services/file_discovery"
@@ -38,7 +39,6 @@ import (
 	"github.com/masami10/kapacitor/services/sensu"
 	"github.com/masami10/kapacitor/services/serverset"
 	"github.com/masami10/kapacitor/services/slack"
-	"github.com/masami10/kapacitor/services/dingding"
 	"github.com/masami10/kapacitor/services/smtp"
 	"github.com/masami10/kapacitor/services/snmptrap"
 	"github.com/masami10/kapacitor/services/static_discovery"
@@ -55,6 +55,8 @@ import (
 	"github.com/influxdata/influxdb/services/collectd"
 	"github.com/influxdata/influxdb/services/graphite"
 	"github.com/influxdata/influxdb/services/opentsdb"
+	"github.com/masami10/kapacitor/services/iotseed"
+	"github.com/masami10/kapacitor/services/jiguang"
 )
 
 // Config represents the configuration format for the kapacitord binary.
@@ -79,12 +81,13 @@ type Config struct {
 	OpsGenie  opsgenie.Config  `toml:"opsgenie" override:"opsgenie"`
 	PagerDuty pagerduty.Config `toml:"pagerduty" override:"pagerduty"`
 	Pushover  pushover.Config  `toml:"pushover" override:"pushover"`
+	Jiguang   jiguang.Config   `toml:"jiguang" override:"jiguang"`
 	HTTPPost  httppost.Configs `toml:"httppost" override:"httppost,element-key=endpoint"`
 	SMTP      smtp.Config      `toml:"smtp" override:"smtp"`
 	SNMPTrap  snmptrap.Config  `toml:"snmptrap" override:"snmptrap"`
 	Sensu     sensu.Config     `toml:"sensu" override:"sensu"`
 	Slack     slack.Config     `toml:"slack" override:"slack"`
-	Dingding  dingding.Config	`toml:"dingding" override:"dingding"`
+	Dingding  dingding.Config  `toml:"dingding" override:"dingding"`
 	Talk      talk.Config      `toml:"talk" override:"talk"`
 	Telegram  telegram.Config  `toml:"telegram" override:"telegram"`
 	VictorOps victorops.Config `toml:"victorops" override:"victorops"`
@@ -105,6 +108,8 @@ type Config struct {
 
 	// Third-party integrations
 	Kubernetes k8s.Configs `toml:"kubernetes" override:"kubernetes,element-key=id" env-config:"implicit-index"`
+
+	IOTSeed iotseed.Config `toml:"iotseed"`
 
 	Reporting reporting.Config `toml:"reporting"`
 	Stats     stats.Config     `toml:"stats"`
@@ -142,6 +147,7 @@ func NewConfig() *Config {
 	c.OpsGenie = opsgenie.NewConfig()
 	c.PagerDuty = pagerduty.NewConfig()
 	c.Pushover = pushover.NewConfig()
+	c.Jiguang = jiguang.NewConfig()
 	c.HTTPPost = httppost.Configs{}
 	c.SMTP = smtp.NewConfig()
 	c.Sensu = sensu.NewConfig()
@@ -156,6 +162,7 @@ func NewConfig() *Config {
 	c.Stats = stats.NewConfig()
 	c.UDF = udf.NewConfig()
 	c.Deadman = deadman.NewConfig()
+	c.IOTSeed = iotseed.NewConfig()
 
 	return c
 }
@@ -256,6 +263,9 @@ func (c *Config) Validate() error {
 	if err := c.Pushover.Validate(); err != nil {
 		return err
 	}
+	if err := c.Jiguang.Validate(); err != nil {
+		return err
+	}
 	if err := c.HTTPPost.Validate(); err != nil {
 		return err
 	}
@@ -285,6 +295,10 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.UDF.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.IOTSeed.Validate(); err != nil {
 		return err
 	}
 
