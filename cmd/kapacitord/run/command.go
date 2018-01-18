@@ -22,6 +22,7 @@ import (
 	"github.com/masami10/kapacitor/client/v1"
 	"bytes"
 	"strings"
+	"encoding/json"
 )
 
 const logo = `
@@ -43,8 +44,11 @@ const (
 	prefixTasksConfigKey    = "tasks/config/"
 	prefixTasksIsCreatedKey = "tasks/is_created/"
 	prefixTasksInNodeKey    = "tasks/in_node/"
-	prefixTasksStatusKey    = "tasks/status/"
-	totalTaskNumKey  		= "kapacitors/task_num/"
+	//prefixTasksStatusKey    = "tasks/status/"
+	totalTaskNumKey         = "kapacitors/task_num/"
+	prefixOpPatchKey		= "tasks/op/patch/"
+	opDeleteKey		        = "tasks/op/delete"
+	prefixOpResponseKey     = "tasks/op_response/rev/"
 )
 
 var kcli *client.Client
@@ -182,6 +186,12 @@ func (cmd *Command) Run(args ...string) error {
 		}
 	}()
 
+	// update task
+	go cmd.watchPatchKey(config, cli)
+
+	// delete task
+	go cmd.watchDeleteKey(config, cli)
+
 	return nil
 }
 
@@ -264,6 +274,7 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 	rch := cli.Watch(context.Background(), prefixTasksIdKey, clientv3.WithPrefix())
 
 	for wresp := range rch {
+		revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
 		for _, ev := range wresp.Events {
 			evType := ev.Type.String()
 			if evType == "PUT"{
@@ -334,7 +345,7 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 				ctx, cancel := context.WithTimeout(context.Background(), 1 * time.Second)
 				gresp, err := cli.Get(ctx, taskConfigKey)
 				if err != nil {
-					log.Fatal(err)
+					cmd.Logger.Fatal(err)
 				}
 				cancel()
 
@@ -346,8 +357,19 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 						t, err = createTask(taskConfig)
 						if err != nil {
 							// 创建任务失败
+							_, cerr := cli.Put(context.TODO(), prefixOpResponseKey + revision, `{"error":"`+err.Error()+`"}`)
+							if cerr != nil {
+								cmd.Logger.Println(cerr)
+							}
 							cmd.Logger.Fatal(err)
 						}
+
+						// 内容推送给kapacitor客户端
+						r, err := json.Marshal(t)
+						if err != nil {
+							cmd.Logger.Fatal(err)
+						}
+						fmt.Println("555555555555555", string(r))
 
 						//isCreatedKey := prefixTasksIsCreatedKey + taskId
 						//_, err = cli.Put(context.TODO(), isCreatedKey, "true")
@@ -365,17 +387,23 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 						//	cmd.Logger.Fatal(err)
 						//}
 
+						grResp, err := cli.Grant(context.TODO(), 60)
+						if err != nil {
+							cmd.Logger.Fatal(err)
+						}
+
 						//
 						isCreatedKey := prefixTasksIsCreatedKey + taskId
-						keyStatus := prefixTasksStatusKey + taskId
+						//keyStatus := prefixTasksStatusKey + taskId
 						taskIdInNodeKey := tasksInNodeKey + "/" + taskId
 						kvc := clientv3.NewKV(cli)
 						taskIdKey := prefixTasksIdKey + taskId
 						_, err = kvc.Txn(context.TODO()).
 							If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
 								Then(clientv3.OpPut(isCreatedKey, "true"),
-									clientv3.OpPut(keyStatus, t.Status.String()),
-									clientv3.OpPut(taskIdInNodeKey, taskId)).
+									 //clientv3.OpPut(keyStatus, t.Status.String()),
+									 clientv3.OpPut(taskIdInNodeKey, taskId),
+									 clientv3.OpPut(prefixOpResponseKey + revision, string(r), clientv3.WithLease(grResp.ID))).
 								Commit()
 						if err != nil {
 							cmd.Logger.Fatal(err)
@@ -409,7 +437,201 @@ func (cmd *Command) watchTaskid(c *server.Config, cli *clientv3.Client){
 	}
 }
 
+type TaskConfig struct {
+	// Unique identifier for the task
+	ID string `json:"id"`
+	// The task type (stream|batch).
+	Type string `json:"type"`
+	// The DBs and RPs the task is allowed to access.
+	DBRPs interface{} `json:"dbrps"`
+	//DBRPs string `json:"dbrps"`
+	// The TICKscript for the task.
+	Script string `json:"script"`
+	// ID of task template
+	TemplateID string `json:"template-id"`
+	// Set of vars for a templated task
+	Vars interface{} `json:"vars"`
+	//Vars string `json:"vars"`
+	// Status of the task
+	Status string `json:"status"`
+}
+
+func (cmd *Command) watchPatchKey(c *server.Config, cli *clientv3.Client)  {
+	kvc := clientv3.NewKV(cli)
+	rch := cli.Watch(context.TODO(), prefixOpPatchKey, clientv3.WithPrefix())
+	for wresp := range rch {
+		revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
+		for _, ev := range wresp.Events {
+			if ev.Type.String() == "PUT" {
+				key := string(ev.Kv.Key)
+				data := string(ev.Kv.Value)
+				taskId := strings.Split(key, "/")[3]
+
+				// 获取task所在的节点
+				taskIdKey := prefixTasksIdKey + taskId
+				gresp, err := cli.Get(context.TODO(), taskIdKey)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+
+				fmt.Println(taskIdKey, len(gresp.Kvs))
+
+				var taskHostname string
+				for _, ev := range gresp.Kvs {
+					if string(ev.Key) == taskIdKey {
+						taskHostname = string(ev.Value)
+					}
+				}
+
+				fmt.Println("66666666666666666666666666666666111", taskHostname)
+				fmt.Println(data)
+
+				grResp, err := cli.Grant(context.TODO(), 60)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+
+				var t client.Task
+				t, err = updateTask(taskId, data, taskHostname)
+				if err != nil {
+					// 修改任务失败
+					_, cerr := cli.Put(context.TODO(), prefixOpResponseKey + revision, `{"error":"`+err.Error()+`"}`, clientv3.WithLease(grResp.ID))
+					if cerr != nil {
+						cmd.Logger.Println(cerr)
+					}
+					cmd.Logger.Fatal(err)
+				}
+
+				// 给kapacitor客户端响应内容
+				var buf bytes.Buffer
+				err = json.NewEncoder(&buf).Encode(t)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				fmt.Println("555555555555555", buf.String())
+
+
+				// task config
+				//var rawTask task_store.Task
+				//rawTask.ID = t.ID
+				//rawTask.Type = task_store.TaskType(t.Type)
+				//rawTask.TICKscript = t.TICKscript
+				//rawTask.DBRPs = t.DBRPs
+				//rawTask.Status = task_store.Status(t.Status)
+				//rawTask.TemplateID = t.TemplateID
+				//rawTask.Vars =  string(t.Vars.UnmarshalJSON())
+
+				var rawTask2 TaskConfig
+				//dbrps, _ := json.Marshal(t.DBRPs)
+				//vars, _ := json.Marshal(t.Vars)
+				rawTask2.ID = t.ID
+				rawTask2.Type = t.Type.String()
+				rawTask2.Script = t.TICKscript
+				rawTask2.DBRPs = t.DBRPs
+				//rawTask2.DBRPs = string(dbrps)
+				rawTask2.Status = t.Status.String()
+				rawTask2.TemplateID = t.TemplateID
+				rawTask2.Vars =  t.Vars
+				//rawTask2.Vars =  string(vars)
+
+
+				r, err := json.Marshal(rawTask2)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				//var buf2 bytes.Buffer
+				//fmt.Println(t)
+				//fmt.Println(t.Dot)
+				//err = json.NewEncoder(&buf2).Encode(t)
+				fmt.Println(string(r), "34444443333333333333333333444444444444444")
+
+
+				_, err = kvc.Txn(context.TODO()).
+					If(clientv3.Compare(clientv3.ModRevision(prefixOpPatchKey + taskId), "=", wresp.Header.GetRevision())).
+						Then(clientv3.OpPut(prefixOpResponseKey + revision, buf.String(), clientv3.WithLease(grResp.ID)),
+							clientv3.OpPut(prefixTasksConfigKey + taskId, string(r)),
+								clientv3.OpDelete(prefixOpPatchKey + taskId)).
+							Commit()
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+			}
+		}
+	}
+}
+
+func (cmd *Command) watchDeleteKey(c *server.Config, cli *clientv3.Client)  {
+	rch := cli.Watch(context.TODO(), opDeleteKey, clientv3.WithPrefix())
+	kvc := clientv3.NewKV(cli)
+	for wresp := range rch {
+		for _, ev := range wresp.Events {
+			if ev.Type.String() == "PUT" {
+				taskId := string(ev.Kv.Value)
+				// 检查etcd上taskId是否存在
+				gresp, err := cli.Get(context.TODO(), prefixTasksIdKey+taskId)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				if len(gresp.Kvs) == 0 {
+					continue
+				}
+
+				// 获取task所在的节点
+				taskIdKey := prefixTasksIdKey +taskId
+				gresp, err = cli.Get(context.TODO(), taskIdKey)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				if len(gresp.Kvs) == 0 {
+					continue
+				}
+
+				var taskHostname string
+				for _, ev := range gresp.Kvs {
+					if string(ev.Key) == taskIdKey {
+						taskHostname = string(ev.Value)
+					}
+				}
+
+				fmt.Println("7777777777777777777777777", taskHostname)
+
+				// 删除kapacitor上任务, 任务总数减一
+				err = deleteTask(taskId, taskHostname)
+
+				var totalTaskNum string
+				gresp, err = cli.Get(context.TODO(), totalTaskNumKey)
+				if err != nil {
+					cmd.Logger.Fatal(err)
+				}
+				for _, ev := range gresp.Kvs {
+					if string(ev.Key) == totalTaskNumKey {
+						num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
+						totalTaskNum = strconv.FormatInt(num-1, 10)
+					}
+				}
+
+				tresp, terr := kvc.Txn(context.TODO()).
+					If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskHostname)).
+					Then(clientv3.OpDelete(taskIdKey),
+						//clientv3.OpDelete(prefixTasksStatusKey + taskId),
+							clientv3.OpDelete(prefixTasksInNodeKey + taskHostname + "/" + taskId),
+								clientv3.OpDelete(prefixTasksConfigKey + taskId),
+									clientv3.OpDelete(prefixTasksIsCreatedKey + taskId),
+									clientv3.OpPut(totalTaskNumKey, totalTaskNum)).
+						Commit()
+				if terr != nil {
+					cmd.Logger.Fatal(terr)
+				}
+				fmt.Println("1111111111111111111111111", tresp.Succeeded)
+
+			}
+		}
+	}
+}
+
 func (cmd *Command) watchHostname(c *server.Config, cli *clientv3.Client)  {
+	// 当节点失效后的处理
+
 	kvc := clientv3.NewKV(cli)
 	rch := cli.Watch(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
 
@@ -511,27 +733,14 @@ func (cmd *Command) recreateTasks(c *server.Config, cli *clientv3.Client) {
 			fmt.Println("break 00000000000000000000000000000000000000000000000000000")
 			break
 		}
-		fmt.Println("222222222222222222222222222200000000000000000000000000000000")
 
-		// 查询id所在的节点的域名
 		taskInKpKey := prefixTasksIdKey+id
-		resp, err := cli.Get(context.TODO(), taskInKpKey)
-		if err != nil {
-			log.Fatal(err)
-		}
-		var taskOldHostname string
-		for _, ev := range resp.Kvs {
-			if string(ev.Key) == taskInKpKey {
-				taskOldHostname = string(ev.Value)
-			}
-		}
 
 		fmt.Println(taskInKpKey)
-		fmt.Println(taskOldHostname)
 		fmt.Println("-----222222222222222222223333333333333333333333333333333337777777777777777")
 
 		tresp, err := kvc.Txn(context.TODO()).
-			If(clientv3.Compare(clientv3.Value(taskInKpKey), "=", taskOldHostname), clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+id), "=", "false")).
+			If(clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+id), "=", "false")).
 			Then(clientv3.OpPut(prefixTasksIsCreatedKey+id, "processing"), clientv3.OpPut(taskInKpKey, c.Hostname)).
 			Commit()
 		if err != nil {
@@ -560,6 +769,7 @@ func (cmd *Command) recreateTasks(c *server.Config, cli *clientv3.Client) {
 						fmt.Println("create task", id, "666666666666666666666666666666666666666666666666666666666")
 						cmd.Logger.Fatal(err)
 					}
+					fmt.Println("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 
 					// todo 要改成事务操作
 					_, err := cli.Put(context.TODO(), prefixTasksIsCreatedKey+id, "true")
@@ -615,6 +825,43 @@ func createTask(task_config string) (client.Task, error) {
 	return t, err
 }
 
+func updateTask(id string, data string, hostname string) (client.Task, error) {
+	url := "http://" + hostname + ":9092/kapacitor/v1/tasks/" + id
+	var buf bytes.Buffer
+	buf.Write([]byte(data))
+	req, err := http.NewRequest("PATCH", url, &buf)
+	if err != nil {
+		//return client.Task{}, err
+	}
+	fmt.Println("777777777777777777777777778888888888888888888888888888888")
+	req.Header.Set("Content-Type", "application/json")
+
+	t := client.Task{}
+
+	_, err = kcli.Do(req, &t, http.StatusOK)
+
+	fmt.Println("777777777777777777777777777777777777777777777777777777777777777777")
+
+	return t, err
+}
+
+func deleteTask(id string, hostname string) error {
+	url := "http://" + hostname + ":9092/kapacitor/v1/tasks/" + id
+
+	var buf bytes.Buffer
+	req, err := http.NewRequest("DELETE", url, &buf)
+	if err != nil {
+		//return client.Task{}, err
+	}
+	fmt.Println("66666666666666666666666666668888888888888888888888888888888")
+	req.Header.Set("Content-Type", "application/json")
+
+	t := client.Task{}
+
+	_, err = kcli.Do(req, &t, http.StatusOK)
+
+	return err
+}
 
 // ParseFlags parses the command line flags from args and returns an options set.
 func (cmd *Command) ParseFlags(args ...string) (Options, error) {
