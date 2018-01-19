@@ -29,6 +29,8 @@ const (
 	prefixOpResponseKey = "tasks/op_response/rev/"
 )
 
+const CFS_ALGO = "CFS"
+
 type TaskEtcd struct {
 	Cli *clientv3.Client
 	Kcli *client.Client
@@ -123,42 +125,15 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 			evType := ev.Type.String()
 			if evType == "PUT" {
 				// 计算延迟事务时间
-				// 1. 查询总任务数
-				taskNum := int64(0)
-				resp, err := cli.Get(context.TODO(), totalTaskNumKey)
-				if err != nil {
-					 log.Fatal(err)
-				}
-				for _, ev := range resp.Kvs {
-					if string(ev.Key) == totalTaskNumKey {
-						taskNum, _ = strconv.ParseInt(string(ev.Value), 10, 64)
-					}
-				}
-				// 2. 查询节点数
-				resp, err = cli.Get(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
-				nodeNum := int64(len(resp.Kvs))
-
-				// 3. 查询节点任务数
-				tasksInNodeKey := prefixTasksInNodeKey + c.Hostname
-				resp, err = cli.Get(context.TODO(), tasksInNodeKey, clientv3.WithPrefix())
-				nodeTaskNum := int64(len(resp.Kvs))
-
-				// 4. 计算每个节点应该分配的任务数
-				avgTaskNum := (taskNum+1)/nodeNum + 1
-
-				// 5. 计算延迟抓取时间
-				diff := nodeTaskNum - avgTaskNum
-
-				fmt.Println("6666666666666666666666666666666666666666666666666677777777777777777777777777777777")
-				fmt.Println(nodeTaskNum, avgTaskNum, diff)
-
-				delayTime := int64(0)
-				if diff > 0 {
-					delayTime = diff
+				delayTime := time.Duration(0)
+				if c.TaskSchedAlgo == CFS_ALGO{
+					delayTime = cfs(te.Cli, c.Hostname)
+				}else {
+					log.Fatal("The scheduling algorithm"+c.TaskSchedAlgo+" is not supported")
 				}
 
 				//time.Sleep(time.Duration(delayTime * 100) * time.Microsecond)
-				time.Sleep(time.Duration(delayTime) * time.Second)
+				time.Sleep(delayTime)
 
 				fmt.Println(delayTime)
 				//事务创建任务
@@ -205,7 +180,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 							if cerr != nil {
 								 log.Println(cerr)
 							}
-							 log.Fatal(err)
+							 log.Fatal("E! ", err)
 						}
 
 						// 内容推送给kapacitor客户端
@@ -222,6 +197,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 
 						//
 						isCreatedKey := prefixTasksIsCreatedKey + taskId
+						tasksInNodeKey := prefixTasksInNodeKey + c.Hostname
 						//keyStatus := prefixTasksStatusKey + taskId
 						taskIdInNodeKey := tasksInNodeKey + "/" + taskId
 						kvc := clientv3.NewKV(cli)
@@ -499,6 +475,10 @@ func (te *TaskEtcd) WatchHostname(c *server.Config) {
 
 func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 	// 把失效节点的任务重新创建
+
+	if c.TaskSchedAlgo != CFS_ALGO{
+		log.Fatal("The scheduling algorithm"+c.TaskSchedAlgo+" is not supported")
+	}
 
 	cli := te.Cli
 	resp, err := cli.Get(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())

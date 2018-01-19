@@ -116,6 +116,9 @@ type Config struct {
 	SkipConfigOverrides    bool   `toml:"skip-config-overrides"`
 	DefaultRetentionPolicy string `toml:"default-retention-policy"`
 
+	EtcdServers            string  `toml:"etcd_servers"`
+	TaskSchedAlgo          string  `toml:"task_sched_algo"`
+
 	Commander command.Commander `toml:"-"`
 }
 
