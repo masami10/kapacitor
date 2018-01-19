@@ -153,7 +153,10 @@ func (cmd *Command) Run(args ...string) error {
 	var keepAliveCh chan int
 	//go cmd.registryToEtcd(config, cli, keepAliveCh)
 
-	taskEtcd, err := tasksched.NewTaskEtcd(config)
+	taskEtcd, err := tasksched.NewTaskEtcd(config, cmd.logService)
+	if err != nil {
+		return fmt.Errorf("create tasketcd: %s", err)
+	}
 	go taskEtcd.RegistryToEtcd(config, keepAliveCh)
 
 
