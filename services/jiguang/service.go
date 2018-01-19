@@ -38,7 +38,7 @@ func NewService(c Config, l *log.Logger) *Service {
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,
 		},
-		Timeout: time.Duration(5 * time.Second),
+		Timeout: time.Duration(10 * time.Second),
 	})
 	s.basicToken.Store("Basic " + base64.StdEncoding.EncodeToString([]byte(c.APIKey+":"+c.APISecret)))
 	return s
@@ -68,7 +68,7 @@ func (s *Service) Update(newConfig []interface{}) error {
 			Transport: &http.Transport{
 				Proxy:           http.ProxyFromEnvironment,
 			},
-			Timeout: time.Duration(5 * time.Second),
+			Timeout: time.Duration(10 * time.Second),
 		})
 		s.basicToken.Store("Basic " + base64.StdEncoding.EncodeToString([]byte(c.APIKey+":"+c.APISecret)))
 	}
@@ -158,23 +158,23 @@ func (s *Service) Test(options interface{}) error {
 
 // priority returns the jiguang priority as defined by the Jiguang API
 // documentation https://jiguang.net/api
-func priority(level alert.Level) int {
+func priority(level alert.Level) string {
 	switch level {
 	case alert.OK:
 		// send as -2 to generate no notification/alert
-		return -2
+		return "OK"
 	case alert.Info:
 		// -1 to always send as a quiet notification
-		return -1
+		return "INFO"
 	case alert.Warning:
 		// 0 to display as high-priority and bypass the user's quiet hours,
-		return 0
+		return "WARNING"
 	case alert.Critical:
 		// 1 to also require confirmation from the user
-		return 1
+		return "CRITICAL"
 	}
 
-	return 0
+	return "OK"
 }
 
 type postAudience struct {
@@ -183,25 +183,27 @@ type postAudience struct {
 
 }
 
-type PostCommonNotification struct {
-	Alert string `json:"alert"`
+type PostExtrainfo struct {
+	Level string `json:"level"`
 }
 
 type postIOSNotification struct {
-	PostCommonNotification
-	Sound            string `json:"sound"` //默认为'default'
-	ContentAvailable bool   `json:"content-available"`
+	Alert string `json:"alert"`
+	Extras PostExtrainfo `json:"extras,omitempty"`
+	Sound            string `json:"sound,omitempty"` //默认为'default'
+	ContentAvailable bool   `json:"content-available,omitempty"`
 }
 
 type postAndroidNotification struct {
-	PostCommonNotification
-	Title    string `json:"title"`
-	Priority int    `json:"priority"`
+	Alert string `json:"alert"`
+	Extras PostExtrainfo `json:"extras,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Priority int    `json:"priority,omitempty"`
 }
 
 type postNotification struct {
-	IOSMessage     postIOSNotification     `json:"ios-message,omitempty"`
-	AndoridMessage postAndroidNotification `json:"and-message,omitempty"`
+	IOSMessage     postIOSNotification     `json:"ios,omitempty"`
+	AndoridMessage postAndroidNotification `json:"android,omitempty"`
 }
 
 type postOptions struct {
@@ -218,7 +220,7 @@ type postData struct {
 	Platform string       `json:"platform"`
 	Audience postAudience `json:"audience,omitempty"`
 	//message  postMessage
-	Notification interface{} `json:"notification"`
+	Notification postNotification `json:"notification"`
 	Message      postMessage `json:"message"`
 	Options      postOptions `json:"options,omitempty"`
 	CID          string `json:"cid,omitempty"`
@@ -258,12 +260,6 @@ func (s *Service) preparePost(message, title, users string, details string, leve
 		return "", nil, nil
 	}
 
-	pData := postData{
-		Platform:     "all",
-		Notification: PostCommonNotification{Alert: message}, //现阶段默认设定为message
-		Message:	  postMessage{MessageContent: details},
-	}
-
 	alias := make([]string, len(devices))
 
 	for i, device := range devices {
@@ -276,6 +272,15 @@ func (s *Service) preparePost(message, title, users string, details string, leve
 	if len(alias) == 0 {
 		return "", nil, fmt.Errorf("没有找到可以发送的对象")
 	}
+
+	pData := postData{
+		Platform:     "all",
+		Notification: postNotification{
+			IOSMessage:postIOSNotification{Alert:message,Extras:PostExtrainfo{Level:priority(level)}},
+			AndoridMessage:postAndroidNotification{Alert: message, Extras:PostExtrainfo{Level:priority(level)},Title:title}}, //现阶段默认设定为message
+		Message:	  postMessage{MessageContent: details},
+	}
+
 
 	pData.Audience.RegistrationId = RemoveRepByLoop(alias) //去重
 
