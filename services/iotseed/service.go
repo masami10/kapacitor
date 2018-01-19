@@ -262,7 +262,7 @@ func (s *Service) Do(req *http.Request) (*http.Response, error) {
 		if time.Now().Unix() > _token_info.TokenExpiry {
 			s.tokenRefresh()
 		}
-		req.Header.Set("Authorization", s.tokenInfo.Load().(tokenInfo).Token) //必须重新load 可能之前已经refresh
+		req.Header.Set("X-Authorization", "Bearer " + s.tokenInfo.Load().(tokenInfo).Token) //必须重新load 可能之前已经refresh
 	}
 
 	return client.Do(req)
@@ -316,7 +316,7 @@ func (s *Service) prepareGetDevices(users string) (*http.Request, error) {
 	}
 
 	u.Path = path.Join(u.Path, c.TerminalControllerUri)
-	URL := strings.Join([]string{c.APIServer, u.Path}, "")
+	URL := strings.Join([]string{c.APIServer,"api",c.APIVersion, u.Path}, "/")
 	req, err := http.NewRequest("GET", URL, nil)
 	if err != nil {
 		return nil, err

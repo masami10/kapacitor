@@ -9,7 +9,6 @@ import (
 	"log"
 	"time"
 	"net/http"
-	"strings"
 	"sync/atomic"
 
 	"github.com/masami10/kapacitor/alert"
@@ -76,8 +75,8 @@ func (s *Service) Update(newConfig []interface{}) error {
 	return nil
 }
 
-func (s *Service) Alert(message, title, users string, level alert.Level) error {
-	url, post, err := s.preparePost(message, title, users, level)
+func (s *Service) Alert(message, title, users string, details string, level alert.Level) error {
+	url, post, err := s.preparePost(message, title, users, details, level)
 	if err != nil {
 		return err
 	}
@@ -98,7 +97,7 @@ func (s *Service) Alert(message, title, users string, level alert.Level) error {
 			return err
 		}
 		pushoverResponse := struct {
-			Errors []string `json:"errors"`
+			Error string `json:"error"`
 		}{}
 		err = json.Unmarshal(body, pushoverResponse)
 		if err != nil {
@@ -107,7 +106,7 @@ func (s *Service) Alert(message, title, users string, level alert.Level) error {
 		type response struct {
 			Error string `json:"error"`
 		}
-		r := &response{Error: fmt.Sprintf("failed to understand Jiguang response. code: %d content: %s", resp.StatusCode, strings.Join(pushoverResponse.Errors, ", "))}
+		r := &response{Error: fmt.Sprintf("failed to understand Jiguang response. code: %d content: %s", resp.StatusCode, pushoverResponse.Error)}
 		b := bytes.NewReader(body)
 		dec := json.NewDecoder(b)
 		dec.Decode(r)
@@ -129,6 +128,7 @@ type testOptions struct {
 	Message  string      `json:"message"`
 	Users    string      `json:"uses"`
 	Title    string      `json:"title"`
+	Details    string      `json:"details"`
 	Level    alert.Level `json:"level"`
 }
 
@@ -136,6 +136,7 @@ func (s *Service) TestOptions() interface{} {
 	return &testOptions{
 		Users: 	 "demo@empower.cn",
 		Message: "test pushover message",
+		Details: "test pushover details",
 		Level:   alert.Critical,
 	}
 }
@@ -150,6 +151,7 @@ func (s *Service) Test(options interface{}) error {
 		o.Message,
 		o.Title,
 		o.Users,
+		o.Details,
 		o.Level,
 	)
 }
@@ -176,7 +178,9 @@ func priority(level alert.Level) int {
 }
 
 type postAudience struct {
-	Alias []string `json:"alias"` //通过用户别名来发送消息
+	Alias []string `json:"alias,omitempty"` //通过用户别名来发送消息
+	RegistrationId []string `json:"registration_id,omitempty"` //通过用户别名来发送消息
+
 }
 
 type PostCommonNotification struct {
@@ -206,19 +210,39 @@ type postOptions struct {
 	ApnsProduction bool `json:"apns_production,omitempty"` //ios 是否推送生产环境
 }
 
-type postData struct {
-	Platform string       `json:"platform"`
-	Audience postAudience `json:"audience"`
-	//message  postMessage
-	Notification interface{} `json:"notification"`
-	Options      postOptions `json:"options,omitempty"`
-	Title        string
-	URL          string
-	URLTitle     string
-	CID          string `json:"cid"`
+type postMessage struct {
+	MessageContent         string  `json:"msg_content,omitempty"`
 }
 
-func (s *Service) preparePost(message, title, users string, level alert.Level) (string, []byte, error) {
+type postData struct {
+	Platform string       `json:"platform"`
+	Audience postAudience `json:"audience,omitempty"`
+	//message  postMessage
+	Notification interface{} `json:"notification"`
+	Message      postMessage `json:"message"`
+	Options      postOptions `json:"options,omitempty"`
+	CID          string `json:"cid,omitempty"`
+}
+
+// 通过两重循环过滤重复元素
+func RemoveRepByLoop(slc []string) []string {
+	result := []string{}  // 存放结果
+	for i := range slc{
+		flag := true
+		for j := range result{
+			if slc[i] == result[j] || slc[i] == ""{
+				flag = false  // 存在重复元素，标识为false
+				break
+			}
+		}
+		if flag {  // 标识为false，不添加进结果
+			result = append(result, slc[i])
+		}
+	}
+	return result
+}
+
+func (s *Service) preparePost(message, title, users string, details string, level alert.Level) (string, []byte, error) {
 	c := s.config()
 
 	if !c.Enabled {
@@ -236,13 +260,24 @@ func (s *Service) preparePost(message, title, users string, level alert.Level) (
 
 	pData := postData{
 		Platform:     "all",
-		Audience:     postAudience{Alias: make([]string, len(devices))},
 		Notification: PostCommonNotification{Alert: message}, //现阶段默认设定为message
+		Message:	  postMessage{MessageContent: details},
 	}
 
-	for _, device := range devices {
-		pData.Audience.Alias = append(pData.Audience.Alias, device.Alias)
+	alias := make([]string, len(devices))
+
+	for i, device := range devices {
+		if device.Alias == ""{
+			continue
+		}
+		alias[i] = device.RegisterId
 	}
+
+	if len(alias) == 0 {
+		return "", nil, fmt.Errorf("没有找到可以发送的对象")
+	}
+
+	pData.Audience.RegistrationId = RemoveRepByLoop(alias) //去重
 
 	ret, err := json.Marshal(pData)
 	if err != nil {
@@ -279,6 +314,7 @@ func (h *handler) Handle(event alert.Event) {
 		event.State.Message,
 		h.c.Title,
 		h.c.AtPeopleOnIotseed,
+		event.State.Details,
 		event.State.Level,
 	); err != nil {
 		h.logger.Println("E! failed to send event to Jiguang", err)

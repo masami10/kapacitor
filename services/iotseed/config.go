@@ -31,7 +31,7 @@ type Config struct {
 func NewConfig() Config {
 	return Config{
 		Enabled:               false,
-		APIServer:             "http://127.0.0.1:8000",
+		APIServer:             "http://127.0.0.1:8000/api",
 		APIVersion:            "v2",
 		TerminalControllerUri: "terminal-devices",
 		InsecureSkipVerify:    true,
