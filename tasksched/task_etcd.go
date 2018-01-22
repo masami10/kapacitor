@@ -24,7 +24,7 @@ const (
 	prefixTasksConfigKey    = "tasks/config/"
 	prefixTasksIsCreatedKey = "tasks/is_created/"
 	prefixTasksInNodeKey    = "tasks/in_node/"
-	totalTaskNumKey         = "kapacitors/task_num/"
+	totalTaskNumKey         = "kapacitors/task_num"
 	prefixOpPatchKey        = "tasks/op/patch/"
 	opDeleteKey             = "tasks/op/delete"
 	prefixOpResponseKey     = "tasks/op_response/rev/"
@@ -54,7 +54,7 @@ func NewTaskEtcd(c *server.Config, logService logging.Interface) (*TaskEtcd, err
 		return nil, err
 	}
 
-	kcli, err := connect("http://"+c.Hostname+":9092", false)
+	kcli, err := connect("http://localhost:9092", false)
 
 	if err != nil {
 		return nil, err
@@ -94,7 +94,7 @@ func (te *TaskEtcd) RegistryToEtcd(c *server.Config, kch chan int) {
 	kvc := clientv3.NewKV(cli)
 	_, err = kvc.Txn(context.TODO()).
 		If(clientv3.Compare(clientv3.Value(hostnameKey), "=", hostName)).
-		Then(clientv3.OpPut(hostnameRevKey, "0")).
+		Then(clientv3.OpPut(hostnameRevKey, "0"), clientv3.OpPut(totalTaskNumKey, "0")).
 		Commit()
 	if err != nil {
 		te.Logger.Fatal("E! ", err)
@@ -105,9 +105,9 @@ func (te *TaskEtcd) RegistryToEtcd(c *server.Config, kch chan int) {
 		te.Logger.Fatal("E! ", err)
 	}
 	go func() {
+
 		for kresp := range ch {
-			//kch <- 1
-			fmt.Println("TTL: ", kresp.TTL)
+			kresp.GetRevision()
 		}
 		te.Logger.Fatal("E! etcd down")
 	}()
@@ -197,6 +197,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 							if terr != nil {
 								te.Logger.Println("E! etcd error while delete task information: ", err)
 							}
+							fmt.Println(201)
 							continue
 						}
 
@@ -219,8 +220,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 
 						//
 						isCreatedKey := prefixTasksIsCreatedKey + taskId
-						tasksInNodeKey := prefixTasksInNodeKey + c.Hostname
-						taskIdInNodeKey := tasksInNodeKey + "/" + taskId
+						taskIdInNodeKey := prefixTasksInNodeKey + c.Hostname + "/" + taskId
 						kvc := clientv3.NewKV(cli)
 						taskIdKey := prefixTasksIdKey + taskId
 
@@ -239,8 +239,9 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 						}
 						for {
 							// 把任务数量加一
-							totalTaskNum := "1"
-
+							var totalTaskNum string
+							var newTotalTaskNum string
+							fmt.Println(247)
 							resp, err := cli.Get(context.TODO(), totalTaskNumKey)
 							if err != nil {
 								te.Logger.Println("E! get total task num error: ", err)
@@ -248,19 +249,22 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 							}
 							for _, ev := range resp.Kvs {
 								if string(ev.Key) == totalTaskNumKey {
+									totalTaskNum = string(ev.Value)
 									num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
-									totalTaskNum = strconv.FormatInt(num+1, 10)
+									newTotalTaskNum = strconv.FormatInt(num+1, 10)
 								}
 							}
 							tresp, terr := cli.Txn(context.TODO()).
 								If(clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
-								Then(clientv3.OpPut(totalTaskNumKey, totalTaskNum)).
+								Then(clientv3.OpPut(totalTaskNumKey, newTotalTaskNum)).
 								Commit()
 							if terr != nil {
 								te.Logger.Println("E! update total task num error: ", terr)
 								continue
 							}
+							fmt.Println(tresp.Succeeded)
 							if tresp.Succeeded == true {
+								fmt.Println(267)
 								break
 							}
 							time.Sleep(100 * time.Microsecond)
@@ -544,7 +548,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 	}
 	kapacitorNum := len(resp.Kvs)
 
-	fmt.Println("kapacitor_num", kapacitorNum)
+	//fmt.Println("kapacitor_num", kapacitorNum)
 	if kapacitorNum == 0 {
 		return
 	}
@@ -570,8 +574,8 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 
 	avgTaskNum := uncreatedTaskNum/kapacitorNum + 1
 
-	fmt.Println(taskIds)
-	fmt.Println(uncreatedTaskNum, kapacitorNum, avgTaskNum)
+	//fmt.Println(taskIds)
+	//fmt.Println(uncreatedTaskNum, kapacitorNum, avgTaskNum)
 
 	// 事务修改avg_task_num个任务status = processing , 和任务所在的节点
 

@@ -77,6 +77,14 @@ func (cmd *Command) Run(args ...string) error {
 		return fmt.Errorf("parse config: %s", err)
 	}
 
+	// 删除原始db文件
+	if _, err := os.Stat(config.Storage.BoltDBPath); err == nil {
+		err = os.Remove(config.Storage.BoltDBPath)
+		if err != nil {
+			return fmt.Errorf("failed to delete storage file: %s", err)
+		}
+	}
+
 	// Apply any environment variables on top of the parsed config
 	if err := config.ApplyEnvOverrides(); err != nil {
 		return fmt.Errorf("apply env config: %v", err)
@@ -123,7 +131,7 @@ func (cmd *Command) Run(args ...string) error {
 
 	taskEtcd, err := tasksched.NewTaskEtcd(config, cmd.logService)
 	if err != nil {
-		return fmt.Errorf("create tasketcd: %s", err)
+		return fmt.Errorf("E! Create tasketcd: %s", err)
 	}
 	go taskEtcd.RegistryToEtcd(config, keepAliveCh)
 
