@@ -170,7 +170,7 @@ func (cmd *Command) Run(args ...string) error {
 	// 查找is_create=false的任务并创建
 	go func() {
 		for {
-			go taskEtcd.RecreateTasks(config)
+			taskEtcd.RecreateTasks(config)
 			time.Sleep(3 * time.Second)
 		}
 	}()

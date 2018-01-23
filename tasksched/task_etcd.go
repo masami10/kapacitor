@@ -32,6 +32,8 @@ const (
 
 const CFS_ALGO = "CFS"
 
+const respTemplate = `{"status_code": "%s", "data": %s}`
+
 type TaskEtcd struct {
 	Cli    *clientv3.Client
 	Kcli   *client.Client
@@ -174,26 +176,32 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 						taskConfig := string(ev.Value)
 
 						var t client.Task
-						t, err = createTask(taskConfig, te.Kcli)
+						t, statusCode, err := createTask(taskConfig, te.Kcli)
 						if err != nil {
 							// 创建任务失败
 							// 删除etcd上任务信息
 							te.Logger.Println("E! create tasks error: ", err)
-							var grResp *clientv3.LeaseGrantResponse
-							for {
-								grResp, err = cli.Grant(context.TODO(), 60)
-								if err != nil {
+							//var grResp *clientv3.LeaseGrantResponse
+							//for {
+								grResp, gerr := cli.Grant(context.TODO(), 60)
+								if gerr != nil {
 									te.Logger.Println("E! etcd grant time error: ", err)
 									continue
 								}
-								break
-							}
+							//	break
+							//}
+							fmt.Println(193)
+							respData := fmt.Sprintf(respTemplate, statusCode, `"`+err.Error()+`"`)
+
+							fmt.Println(respData)
 							_, terr := kvc.Txn(context.TODO()).
-								If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskId)).
+								If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
 								Then(clientv3.OpDelete(taskIdKey),
 									clientv3.OpDelete(prefixTasksConfigKey+taskId),
-									clientv3.OpPut(prefixOpResponseKey+revision, `{"error":"`+err.Error()+`"}`, clientv3.WithLease(grResp.ID))).
+									clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
+										).
 								Commit()
+							fmt.Println(199)
 							if terr != nil {
 								te.Logger.Println("E! etcd error while delete task information: ", err)
 							}
@@ -206,6 +214,8 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 						if err != nil {
 							te.Logger.Println("E! json marshal task error: ", err)
 						}
+						respData := fmt.Sprintf(respTemplate, statusCode, string(r))
+
 						fmt.Println("555555555555555", string(r))
 
 						var grResp *clientv3.LeaseGrantResponse
@@ -229,7 +239,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 								If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
 								Then(clientv3.OpPut(isCreatedKey, "true"),
 									clientv3.OpPut(taskIdInNodeKey, taskId),
-									clientv3.OpPut(prefixOpResponseKey+revision, string(r), clientv3.WithLease(grResp.ID))).
+									clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))).
 								Commit()
 							if err != nil {
 								te.Logger.Println("E! put task info error: ", err)
@@ -336,10 +346,11 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 				}
 
 				var t client.Task
-				t, err = updateTask(taskId, data, taskHostname, te.Kcli)
+				t, statusCode, err := updateTask(taskId, data, taskHostname, te.Kcli)
 				if err != nil {
 					// 修改任务失败
-					_, cerr := cli.Put(context.TODO(), prefixOpResponseKey+revision, `{"error":"`+err.Error()+`"}`, clientv3.WithLease(grResp.ID))
+					respData := fmt.Sprintf(respTemplate, statusCode, `"`+err.Error()+`"`)
+					_, cerr := cli.Put(context.TODO(), prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))
 					if cerr != nil {
 						te.Logger.Println("E! faliled to put response info: ", err)
 					}
@@ -351,6 +362,8 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 				if err != nil {
 					te.Logger.Println("E! faile to json marshal task: ", err)
 				}
+				respData := fmt.Sprintf(respTemplate, statusCode, string(rt))
+
 				fmt.Println("555555555555555", string(rt))
 
 				var rawTask2 TaskConfig
@@ -372,7 +385,7 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 				for{
 					_, err = kvc.Txn(context.TODO()).
 						If(clientv3.Compare(clientv3.ModRevision(prefixOpPatchKey+taskId), "=", wresp.Header.GetRevision())).
-						Then(clientv3.OpPut(prefixOpResponseKey+revision, string(rt), clientv3.WithLease(grResp.ID)),
+						Then(clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
 						clientv3.OpPut(prefixTasksConfigKey+taskId, string(r)),
 						clientv3.OpDelete(prefixOpPatchKey+taskId)).
 						Commit()
@@ -535,7 +548,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 	// 把失效节点的任务重新创建
 
 	if c.TaskSchedAlgo != CFS_ALGO {
-		log.Fatal("The scheduling algorithm" + c.TaskSchedAlgo + " is not supported")
+		te.Logger.Fatal("E! The scheduling algorithm" + c.TaskSchedAlgo + " is not supported")
 	}
 
 	cli := te.Cli
@@ -553,12 +566,23 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 		return
 	}
 
+	// 查询本节点任务数量
+	taskInNodeKey := prefixTasksInNodeKey + c.Hostname
+	resp, err = cli.Get(context.TODO(), taskInNodeKey, clientv3.WithPrefix())
+	if err != nil {
+		te.Logger.Println("E! failed to get kapacitor tasks: ", err)
+		return
+	}
+	iTaskNum := len(resp.Kvs)
+
 	// 获取is_created = false 的所有任务id
 	resp, err = cli.Get(context.TODO(), prefixTasksIsCreatedKey, clientv3.WithPrefix())
 	if err != nil {
 		te.Logger.Println("E! get uncreate tasks error: ", err)
 		return
 	}
+	totalTaskNum := len(resp.Kvs)
+
 	var taskIds []string
 	for _, ev := range resp.Kvs {
 		if string(ev.Value) != "false" {
@@ -570,30 +594,32 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 
 		fmt.Printf("%s = %s\n", ev.Key, ev.Value)
 	}
-	uncreatedTaskNum := len(taskIds)
+	//uncreatedTaskNum := len(taskIds)
 
-	avgTaskNum := uncreatedTaskNum/kapacitorNum + 1
+	avgTaskNum := totalTaskNum/kapacitorNum + 1
 
 	//fmt.Println(taskIds)
-	//fmt.Println(uncreatedTaskNum, kapacitorNum, avgTaskNum)
+	//fmt.Println(iTaskNum, kapacitorNum, avgTaskNum)
 
 	// 事务修改avg_task_num个任务status = processing , 和任务所在的节点
 
 	modifiedTasksNum := 0
 	for _, id := range taskIds {
-		if modifiedTasksNum == avgTaskNum {
+		fmt.Println(iTaskNum, kapacitorNum, avgTaskNum, modifiedTasksNum + iTaskNum, "uuuuuuuuuuuuuuuuuuuuuuuuuuuu")
+
+		if modifiedTasksNum + iTaskNum >= avgTaskNum {
 			fmt.Println("break 00000000000000000000000000000000000000000000000000000")
 			break
 		}
 
-		taskInKpKey := prefixTasksIdKey + id
+		taskIdKey := prefixTasksIdKey + id
 
-		fmt.Println(taskInKpKey)
+		fmt.Println(taskIdKey)
 		fmt.Println("-----222222222222222222223333333333333333333333333333333337777777777777777")
 
 		tresp, err := kvc.Txn(context.TODO()).
 			If(clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+id), "=", "false")).
-			Then(clientv3.OpPut(prefixTasksIsCreatedKey+id, "processing"), clientv3.OpPut(taskInKpKey, c.Hostname)).
+			Then(clientv3.OpPut(prefixTasksIsCreatedKey+id, "processing"), clientv3.OpPut(taskIdKey, c.Hostname)).
 			Commit()
 		if err != nil {
 			te.Logger.Println("E! txn update task info error", err)
@@ -616,7 +642,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 				if string(ev.Key) == taskConfigKey {
 					taskConfig := string(ev.Value)
 
-					_, err = createTask(taskConfig, te.Kcli)
+					_, _, err := createTask(taskConfig, te.Kcli)
 					if err != nil {
 						// 创建任务失败
 						te.Logger.Println("E! recreate task error: ", err)
@@ -644,6 +670,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 							te.Logger.Println("E! txn update task info error: ", err)
 							continue
 						}
+						modifiedTasksNum += 1
 						break
 					}
 
@@ -654,7 +681,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 	}
 }
 
-func createTask(task_config string, kcli *client.Client) (client.Task, error) {
+func createTask(task_config string, kcli *client.Client) (client.Task, string, error) {
 	//client := &http.Client{}
 	url := "http://localhost:9092/kapacitor/v1/tasks"
 	t := client.Task{}
@@ -664,7 +691,7 @@ func createTask(task_config string, kcli *client.Client) (client.Task, error) {
 	buf.Write([]byte(task_config))
 	req, err := http.NewRequest("POST", url, &buf)
 	if err != nil {
-		return t, err
+		return t, "500", err
 	}
 	fmt.Println("88888888888888888888888888888888888888888888888888888888888888888")
 	req.Header.Set("Content-Type", "application/json")
@@ -673,10 +700,15 @@ func createTask(task_config string, kcli *client.Client) (client.Task, error) {
 
 	fmt.Println("777777777777777777777777777777777777777777777777777777777777777777")
 
-	return t, err
+	statusCode := "200"
+	if err != nil {
+		statusCode = "400"
+	}
+
+	return t, statusCode, err
 }
 
-func updateTask(id string, data string, hostname string, kcli *client.Client) (client.Task, error) {
+func updateTask(id string, data string, hostname string, kcli *client.Client) (client.Task, string, error) {
 	url := "http://" + hostname + ":9092/kapacitor/v1/tasks/" + id
 	t := client.Task{}
 
@@ -684,7 +716,7 @@ func updateTask(id string, data string, hostname string, kcli *client.Client) (c
 	buf.Write([]byte(data))
 	req, err := http.NewRequest("PATCH", url, &buf)
 	if err != nil {
-		return t, err
+		return t, "500", err
 	}
 	fmt.Println("777777777777777777777777778888888888888888888888888888888")
 	req.Header.Set("Content-Type", "application/json")
@@ -693,7 +725,12 @@ func updateTask(id string, data string, hostname string, kcli *client.Client) (c
 
 	fmt.Println("777777777777777777777777777777777777777777777777777777777777777777")
 
-	return t, err
+	statusCode := "200"
+	if err != nil {
+		statusCode = "400"
+	}
+
+	return t, statusCode, err
 }
 
 func deleteTask(id string, hostname string, kcli *client.Client) error {
