@@ -99,12 +99,12 @@ func (te *TaskEtcd) RegistryToEtcd(c *server.Config, kch chan int) {
 		Then(clientv3.OpPut(hostnameRevKey, "0"), clientv3.OpPut(totalTaskNumKey, "0")).
 		Commit()
 	if err != nil {
-		te.Logger.Fatal("E! ", err)
+		te.Logger.Fatal("E! txn failed ", err)
 	}
 
 	ch, err := cli.KeepAlive(context.TODO(), resp.ID)
 	if err != nil {
-		te.Logger.Fatal("E! ", err)
+		te.Logger.Fatal("E! failed to keepalive ", err)
 	}
 	go func() {
 
@@ -335,6 +335,9 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 						taskHostname = string(ev.Value)
 					}
 				}
+				if taskHostname != c.Hostname {
+					continue
+				}
 
 				fmt.Println("66666666666666666666666666666666111", taskHostname)
 				fmt.Println(data)
@@ -346,7 +349,7 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 				}
 
 				var t client.Task
-				t, statusCode, err := updateTask(taskId, data, taskHostname, te.Kcli)
+				t, statusCode, err := updateTask(taskId, data,te.Kcli)
 				if err != nil {
 					// 修改任务失败
 					respData := fmt.Sprintf(respTemplate, statusCode, `"`+err.Error()+`"`)
@@ -425,11 +428,14 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 						taskHostname = string(ev.Value)
 					}
 				}
+				if taskHostname != c.Hostname {
+					continue
+				}
 
 				fmt.Println("7777777777777777777777777", taskHostname)
 
 				// 删除kapacitor上任务, 任务总数减一
-				err = deleteTask(taskId, taskHostname, te.Kcli)
+				err = deleteTask(taskId, te.Kcli)
 
 				var totalTaskNum string
 
@@ -684,69 +690,98 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 func createTask(task_config string, kcli *client.Client) (client.Task, string, error) {
 	//client := &http.Client{}
 	url := "http://localhost:9092/kapacitor/v1/tasks"
-	t := client.Task{}
 
+	return doTask("POST", url, task_config, kcli)
 
-	var buf bytes.Buffer
-	buf.Write([]byte(task_config))
-	req, err := http.NewRequest("POST", url, &buf)
-	if err != nil {
-		return t, "500", err
-	}
-	fmt.Println("88888888888888888888888888888888888888888888888888888888888888888")
-	req.Header.Set("Content-Type", "application/json")
-
-	_, err = kcli.Do(req, &t, http.StatusOK)
-
-	fmt.Println("777777777777777777777777777777777777777777777777777777777777777777")
-
-	statusCode := "200"
-	if err != nil {
-		statusCode = "400"
-	}
-
-	return t, statusCode, err
+	//t := client.Task{}
+	//
+	//
+	//var buf bytes.Buffer
+	//buf.Write([]byte(task_config))
+	//req, err := http.NewRequest("POST", url, &buf)
+	//if err != nil {
+	//	return t, "500", err
+	//}
+	//req.Header.Set("Content-Type", "application/json")
+	//
+	//_, err = kcli.Do(req, &t, http.StatusOK)
+	//
+	//
+	//statusCode := "200"
+	//if err != nil {
+	//	statusCode = "400"
+	//}
+	//
+	//return t, statusCode, err
 }
 
-func updateTask(id string, data string, hostname string, kcli *client.Client) (client.Task, string, error) {
-	url := "http://" + hostname + ":9092/kapacitor/v1/tasks/" + id
-	t := client.Task{}
+func updateTask(id string, data string, kcli *client.Client) (client.Task, string, error) {
+	url := "http://localhost:9092/kapacitor/v1/tasks/" + id
 
-	var buf bytes.Buffer
-	buf.Write([]byte(data))
-	req, err := http.NewRequest("PATCH", url, &buf)
-	if err != nil {
-		return t, "500", err
-	}
-	fmt.Println("777777777777777777777777778888888888888888888888888888888")
-	req.Header.Set("Content-Type", "application/json")
+	return doTask("PATCH", url, data, kcli)
 
-	_, err = kcli.Do(req, &t, http.StatusOK)
-
-	fmt.Println("777777777777777777777777777777777777777777777777777777777777777777")
-
-	statusCode := "200"
-	if err != nil {
-		statusCode = "400"
-	}
-
-	return t, statusCode, err
+	//t := client.Task{}
+	//
+	//var buf bytes.Buffer
+	//buf.Write([]byte(data))
+	//req, err := http.NewRequest("PATCH", url, &buf)
+	//if err != nil {
+	//	return t, "500", err
+	//}
+	//req.Header.Set("Content-Type", "application/json")
+	//
+	//_, err = kcli.Do(req, &t, http.StatusOK)
+	//
+	//
+	//statusCode := "200"
+	//if err != nil {
+	//	statusCode = "400"
+	//}
+	//
+	//return t, statusCode, err
 }
 
-func deleteTask(id string, hostname string, kcli *client.Client) error {
-	url := "http://" + hostname + ":9092/kapacitor/v1/tasks/" + id
+func deleteTask(id string, kcli *client.Client) error {
+	url := "http://localhost:9092/kapacitor/v1/tasks/" + id
 
-	var buf bytes.Buffer
-	req, err := http.NewRequest("DELETE", url, &buf)
-	if err != nil {
-		return err
-	}
-	fmt.Println("66666666666666666666666666668888888888888888888888888888888")
-	req.Header.Set("Content-Type", "application/json")
-
-	t := client.Task{}
-
-	_, err = kcli.Do(req, &t, http.StatusOK)
+	_, _, err := doTask("DELETE", url, "", kcli)
 
 	return err
+
+	//var buf bytes.Buffer
+	//req, err := http.NewRequest("DELETE", url, &buf)
+	//if err != nil {
+	//	return err
+	//}
+	//req.Header.Set("Content-Type", "application/json")
+	//
+	//t := client.Task{}
+	//
+	//_, err = kcli.Do(req, &t, http.StatusOK)
+	//
+	//return err
+}
+
+func doTask(method string, url string, postData string, kcli *client.Client) (client.Task, string, error) {
+	t := client.Task{}
+
+	var buf bytes.Buffer
+	if len(postData) != 0 {
+		buf.Write([]byte(postData))
+	}
+	req, err := http.NewRequest(method, url, &buf)
+	if err != nil {
+		return t, "500", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	_, err = kcli.Do(req, &t, http.StatusOK)
+
+
+	statusCode := "200"
+	if err != nil {
+		statusCode = "400"
+	}
+
+	return t, statusCode, err
 }
