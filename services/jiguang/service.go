@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"gopkg.in/russross/blackfriday.v2"
+
 	"github.com/masami10/kapacitor/alert"
 
 	"encoding/base64"
@@ -75,8 +77,8 @@ func (s *Service) Update(newConfig []interface{}) error {
 	return nil
 }
 
-func (s *Service) Alert(message, title, users string, details string, level alert.Level) error {
-	url, post, err := s.preparePost(message, title, users, details, level)
+func (s *Service) Alert(message, title, subtype string, users string, details string, level alert.Level) error {
+	url, post, err := s.preparePost(message, title, subtype, users, details, level)
 	if err != nil {
 		return err
 	}
@@ -128,6 +130,7 @@ type testOptions struct {
 	Message  string      `json:"message"`
 	Users    string      `json:"uses"`
 	Title    string      `json:"title"`
+	Subtype    string      `json:"subtype"`
 	Details    string      `json:"details"`
 	Level    alert.Level `json:"level"`
 }
@@ -137,6 +140,7 @@ func (s *Service) TestOptions() interface{} {
 		Users: 	 "demo@empower.cn",
 		Message: "test pushover message",
 		Details: "test pushover details",
+		Subtype: "text",
 		Level:   alert.Critical,
 	}
 }
@@ -150,6 +154,7 @@ func (s *Service) Test(options interface{}) error {
 	return s.Alert(
 		o.Message,
 		o.Title,
+		o.Subtype,
 		o.Users,
 		o.Details,
 		o.Level,
@@ -177,6 +182,33 @@ func priority(level alert.Level) string {
 	return "OK"
 }
 
+func messageType(subtype string) string {
+	switch subtype {
+	case "text":
+		// send as -2 to generate no notification/alert
+		return "text"
+	case "markdown":
+		// -1 to always send as a quiet notification
+		return "html"
+
+		}
+
+	return "text"
+}
+
+func messageContent(subtype string, msg string) string {
+	switch subtype {
+	case "text":
+		return msg
+	case "markdown":
+		output := blackfriday.Run([]byte(msg))
+		return string(output[:])
+
+	}
+
+	return msg
+}
+
 type postAudience struct {
 	Alias []string `json:"alias,omitempty"` //通过用户别名来发送消息
 	RegistrationId []string `json:"registration_id,omitempty"` //通过用户别名来发送消息
@@ -185,6 +217,7 @@ type postAudience struct {
 
 type PostExtrainfo struct {
 	Level string `json:"level"`
+	Subtype string `json:"subtype"`
 }
 
 type postIOSNotification struct {
@@ -244,7 +277,7 @@ func RemoveRepByLoop(slc []string) []string {
 	return result
 }
 
-func (s *Service) preparePost(message, title, users string, details string, level alert.Level) (string, []byte, error) {
+func (s *Service) preparePost(message, title, subtype string, users string, details string, level alert.Level) (string, []byte, error) {
 	c := s.config()
 
 	if !c.Enabled {
@@ -276,9 +309,9 @@ func (s *Service) preparePost(message, title, users string, details string, leve
 	pData := postData{
 		Platform:     "all",
 		Notification: postNotification{
-			IOSMessage:postIOSNotification{Alert:message,Extras:PostExtrainfo{Level:priority(level)}},
-			AndoridMessage:postAndroidNotification{Alert: message, Extras:PostExtrainfo{Level:priority(level)},Title:title}}, //现阶段默认设定为message
-		Message:	  postMessage{MessageContent: details},
+			IOSMessage:postIOSNotification{Alert:message,Extras:PostExtrainfo{Level:priority(level), Subtype:messageType(subtype)}},
+			AndoridMessage:postAndroidNotification{Alert: message, Extras:PostExtrainfo{Level:priority(level), Subtype:messageType(subtype)},Title:title}}, //现阶段默认设定为message
+		Message:	  postMessage{MessageContent: messageContent(subtype,details)},
 	}
 
 
@@ -296,6 +329,8 @@ type HandlerConfig struct {
 
 	// Your message's title, otherwise your apps name is used
 	Title string `mapstructure:"title"`
+
+	Subtype string `mapstructure:"subtype"` // markdown or text
 
 	AtPeopleOnIotseed string `mapstructure:"at-people-on-iotseed"`
 }
@@ -318,6 +353,7 @@ func (h *handler) Handle(event alert.Event) {
 	if err := h.s.Alert(
 		event.State.Message,
 		h.c.Title,
+		h.c.Subtype,
 		h.c.AtPeopleOnIotseed,
 		event.State.Details,
 		event.State.Level,

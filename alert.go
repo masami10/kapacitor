@@ -383,6 +383,9 @@ func newAlertNode(et *ExecutingTask, n *pipeline.AlertNode, l *log.Logger) (an *
 		if p.Title != "" {
 			c.Title = p.Title
 		}
+		if p.Subtype != "" {
+			c.Subtype = p.Subtype
+		}
 		if p.AtPeopleOnIotseed != "" {
 			c.AtPeopleOnIotseed = p.AtPeopleOnIotseed
 		}

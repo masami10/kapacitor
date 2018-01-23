@@ -1148,6 +1148,8 @@ type JiguangHandler struct {
 	// Your message's title, otherwise your apps name is used
 	Title string
 
+	Subtype string
+
 	// A supplementary URL to show with your message
 	AtPeopleOnIotseed string
 

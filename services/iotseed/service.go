@@ -214,7 +214,10 @@ func (s *Service) tokenRefresh() error {
 		return err
 	}
 
-	resp, err := s.Do(req)
+	client := s.clientValue.Load().(*http.Client)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req) //refresh token 不得调用service封装的Do方法
 	if err != nil {
 		return err
 	}
@@ -258,8 +261,7 @@ func (s *Service) Do(req *http.Request) (*http.Response, error) {
 	req.Header.Set("Content-Type", "application/json")
 	token_info := s.tokenInfo.Load()
 	if token_info != nil {
-		_token_info := token_info.(tokenInfo)
-		if time.Now().Unix() > _token_info.TokenExpiry {
+		if time.Now().Unix() > s.tokenInfo.Load().(tokenInfo).TokenExpiry {
 			s.tokenRefresh()
 		}
 		req.Header.Set("X-Authorization", "Bearer " + s.tokenInfo.Load().(tokenInfo).Token) //必须重新load 可能之前已经refresh
