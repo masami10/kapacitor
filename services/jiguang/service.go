@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"time"
 	"net/http"
 	"sync/atomic"
@@ -15,15 +14,23 @@ import (
 
 	"github.com/masami10/kapacitor/alert"
 
+	"github.com/masami10/kapacitor/keyvalue"
+
 	"encoding/base64"
 
 	"github.com/masami10/kapacitor/services/iotseed"
 )
 
+type Diagnostic interface {
+	WithContext(ctx ...keyvalue.T) Diagnostic
+
+	Error(msg string, err error)
+}
+
 type Service struct {
 	configValue atomic.Value
 	clientValue atomic.Value
-	logger      *log.Logger
+	diag        Diagnostic
 	basicToken  atomic.Value
 
 	UserinfoService interface {
@@ -31,9 +38,9 @@ type Service struct {
 	}
 }
 
-func NewService(c Config, l *log.Logger) *Service {
+func NewService(c Config, d Diagnostic) *Service {
 	s := &Service{
-		logger: l,
+		diag: d,
 	}
 	s.configValue.Store(c)
 	s.clientValue.Store(&http.Client{
@@ -299,7 +306,7 @@ func (s *Service) preparePost(message, title, subtype string, users string, deta
 		if device.Alias == ""{
 			continue
 		}
-		alias[i] = device.RegisterId
+		alias[i] = device.Alias
 	}
 
 	if len(alias) == 0 {
@@ -315,7 +322,7 @@ func (s *Service) preparePost(message, title, subtype string, users string, deta
 	}
 
 
-	pData.Audience.RegistrationId = RemoveRepByLoop(alias) //去重
+	pData.Audience.Alias = RemoveRepByLoop(alias) //去重
 
 	ret, err := json.Marshal(pData)
 	if err != nil {
@@ -338,14 +345,14 @@ type HandlerConfig struct {
 type handler struct {
 	s      *Service
 	c      HandlerConfig
-	logger *log.Logger
+	diag   Diagnostic
 }
 
-func (s *Service) Handler(c HandlerConfig, l *log.Logger) alert.Handler {
+func (s *Service) Handler(c HandlerConfig, ctx ...keyvalue.T) alert.Handler {
 	return &handler{
 		s:      s,
 		c:      c,
-		logger: l,
+		diag:   s.diag.WithContext(ctx...),
 	}
 }
 
@@ -358,6 +365,6 @@ func (h *handler) Handle(event alert.Event) {
 		event.State.Details,
 		event.State.Level,
 	); err != nil {
-		h.logger.Println("E! failed to send event to Jiguang", err)
+		h.diag.Error("E! failed to send event to Jiguang", err)
 	}
 }

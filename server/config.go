@@ -1,7 +1,7 @@
 package server
 
 import (
-	"errors"
+	"encoding"
 	"fmt"
 	"os"
 	"os/user"
@@ -18,6 +18,7 @@ import (
 	"github.com/masami10/kapacitor/services/consul"
 	"github.com/masami10/kapacitor/services/deadman"
 	"github.com/masami10/kapacitor/services/dingding"
+	"github.com/masami10/kapacitor/services/diagnostic"
 	"github.com/masami10/kapacitor/services/dns"
 	"github.com/masami10/kapacitor/services/ec2"
 	"github.com/masami10/kapacitor/services/file_discovery"
@@ -27,8 +28,9 @@ import (
 	"github.com/masami10/kapacitor/services/httppost"
 	"github.com/masami10/kapacitor/services/influxdb"
 	"github.com/masami10/kapacitor/services/k8s"
-	"github.com/masami10/kapacitor/services/logging"
+	"github.com/masami10/kapacitor/services/load"
 	"github.com/masami10/kapacitor/services/marathon"
+	"github.com/masami10/kapacitor/services/mqtt"
 	"github.com/masami10/kapacitor/services/nerve"
 	"github.com/masami10/kapacitor/services/opsgenie"
 	"github.com/masami10/kapacitor/services/pagerduty"
@@ -44,6 +46,7 @@ import (
 	"github.com/masami10/kapacitor/services/static_discovery"
 	"github.com/masami10/kapacitor/services/stats"
 	"github.com/masami10/kapacitor/services/storage"
+	"github.com/masami10/kapacitor/services/swarm"
 	"github.com/masami10/kapacitor/services/talk"
 	"github.com/masami10/kapacitor/services/task_store"
 	"github.com/masami10/kapacitor/services/telegram"
@@ -51,6 +54,7 @@ import (
 	"github.com/masami10/kapacitor/services/udf"
 	"github.com/masami10/kapacitor/services/udp"
 	"github.com/masami10/kapacitor/services/victorops"
+	"github.com/pkg/errors"
 
 	"github.com/influxdata/influxdb/services/collectd"
 	"github.com/influxdata/influxdb/services/graphite"
@@ -65,8 +69,9 @@ type Config struct {
 	Replay         replay.Config     `toml:"replay"`
 	Storage        storage.Config    `toml:"storage"`
 	Task           task_store.Config `toml:"task"`
+	Load           load.Config       `toml:"load"`
 	InfluxDB       []influxdb.Config `toml:"influxdb" override:"influxdb,element-key=name"`
-	Logging        logging.Config    `toml:"logging"`
+	Logging        diagnostic.Config `toml:"logging"`
 	ConfigOverride config.Config     `toml:"config-override"`
 
 	// Input services
@@ -78,6 +83,7 @@ type Config struct {
 	// Alert handlers
 	Alerta    alerta.Config    `toml:"alerta" override:"alerta"`
 	HipChat   hipchat.Config   `toml:"hipchat" override:"hipchat"`
+	MQTT      mqtt.Configs     `toml:"mqtt" override:"mqtt,element-key=name"`
 	OpsGenie  opsgenie.Config  `toml:"opsgenie" override:"opsgenie"`
 	PagerDuty pagerduty.Config `toml:"pagerduty" override:"pagerduty"`
 	Pushover  pushover.Config  `toml:"pushover" override:"pushover"`
@@ -107,7 +113,8 @@ type Config struct {
 	Triton          []triton.Config           `toml:"triton" override:"triton,element-key=id"`
 
 	// Third-party integrations
-	Kubernetes k8s.Configs `toml:"kubernetes" override:"kubernetes,element-key=id" env-config:"implicit-index"`
+	Kubernetes k8s.Configs   `toml:"kubernetes" override:"kubernetes,element-key=id" env-config:"implicit-index"`
+	Swarm      swarm.Configs `toml:"swarm" override:"swarm,element-key=id"`
 
 	IOTSeed iotseed.Config `toml:"iotseed"`
 
@@ -136,7 +143,7 @@ func NewConfig() *Config {
 	c.Replay = replay.NewConfig()
 	c.Task = task_store.NewConfig()
 	c.InfluxDB = []influxdb.Config{influxdb.NewConfig()}
-	c.Logging = logging.NewConfig()
+	c.Logging = diagnostic.NewConfig()
 	c.ConfigOverride = config.NewConfig()
 
 	c.Collectd = collectd.NewConfig()
@@ -144,11 +151,12 @@ func NewConfig() *Config {
 
 	c.Alerta = alerta.NewConfig()
 	c.HipChat = hipchat.NewConfig()
+	c.MQTT = mqtt.Configs{mqtt.NewConfig()}
 	c.OpsGenie = opsgenie.NewConfig()
 	c.PagerDuty = pagerduty.NewConfig()
 	c.Pushover = pushover.NewConfig()
-	c.Jiguang = jiguang.NewConfig()
-	c.HTTPPost = httppost.Configs{}
+  c.Jiguang = jiguang.NewConfig()
+	c.HTTPPost = httppost.Configs{httppost.NewConfig()}
 	c.SMTP = smtp.NewConfig()
 	c.Sensu = sensu.NewConfig()
 	c.Slack = slack.NewConfig()
@@ -162,7 +170,8 @@ func NewConfig() *Config {
 	c.Stats = stats.NewConfig()
 	c.UDF = udf.NewConfig()
 	c.Deadman = deadman.NewConfig()
-	c.IOTSeed = iotseed.NewConfig()
+  c.IOTSeed = iotseed.NewConfig()
+	c.Load = load.NewConfig()
 
 	return c
 }
@@ -186,6 +195,7 @@ func NewDemoConfig() (*Config, error) {
 	c.Task.Dir = filepath.Join(homeDir, ".kapacitor", c.Task.Dir)
 	c.Storage.BoltDBPath = filepath.Join(homeDir, ".kapacitor", c.Storage.BoltDBPath)
 	c.DataDir = filepath.Join(homeDir, ".kapacitor", c.DataDir)
+	c.Load.Dir = filepath.Join(homeDir, ".kapacitor", c.Load.Dir)
 
 	return c, nil
 }
@@ -199,15 +209,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("must configure valid data dir")
 	}
 	if err := c.Replay.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "replay")
 	}
 	if err := c.Storage.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "storage")
 	}
 	if err := c.HTTP.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "http")
 	}
 	if err := c.Task.Validate(); err != nil {
+		return errors.Wrap(err, "task")
+	}
+	if err := c.Load.Validate(); err != nil {
 		return err
 	}
 	// Validate the set of InfluxDB configs.
@@ -243,59 +256,62 @@ func (c *Config) Validate() error {
 	// Validate inputs
 	for _, g := range c.Graphite {
 		if err := g.Validate(); err != nil {
-			return fmt.Errorf("invalid graphite config: %v", err)
+			return errors.Wrap(err, "graphite")
 		}
 	}
 
 	// Validate alert handlers
 	if err := c.Alerta.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "alerta")
 	}
 	if err := c.HipChat.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "hipchat")
+	}
+	if err := c.MQTT.Validate(); err != nil {
+		return errors.Wrap(err, "mqtt")
 	}
 	if err := c.OpsGenie.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "opsgenie")
 	}
 	if err := c.PagerDuty.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "pagerduty")
 	}
 	if err := c.Pushover.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "pushover")
 	}
 	if err := c.Jiguang.Validate(); err != nil {
 		return err
 	}
 	if err := c.HTTPPost.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "httppost")
 	}
 	if err := c.SMTP.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "smtp")
 	}
 	if err := c.SNMPTrap.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "snmptrap")
 	}
 	if err := c.Sensu.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "sensu")
 	}
 	if err := c.Slack.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "slack")
 	}
 	if err := c.Dingding.Validate(); err != nil {
 		return err
 	}
 	if err := c.Talk.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "talk")
 	}
 	if err := c.Telegram.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "telegram")
 	}
 	if err := c.VictorOps.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "victorops")
 	}
 
 	if err := c.UDF.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "udf")
 	}
 
 	if err := c.IOTSeed.Validate(); err != nil {
@@ -305,77 +321,81 @@ func (c *Config) Validate() error {
 	// Validate scrapers
 	for i := range c.Scraper {
 		if err := c.Scraper[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "scraper %q", c.Scraper[i].Name)
 		}
 	}
 
 	for i := range c.Azure {
 		if err := c.Azure[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "azure %q", c.Azure[i].ID)
 		}
 	}
 
 	for i := range c.Consul {
 		if err := c.Consul[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "consul %q", c.Consul[i].ID)
 		}
 	}
 
 	for i := range c.DNS {
 		if err := c.DNS[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "dns %q", c.DNS[i].ID)
 		}
 	}
 
 	for i := range c.EC2 {
 		if err := c.EC2[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "ec2 %q", c.EC2[i].ID)
 		}
 	}
 
 	for i := range c.FileDiscovery {
 		if err := c.FileDiscovery[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "file discovery %q", c.FileDiscovery[i].ID)
 		}
 	}
 
 	for i := range c.GCE {
 		if err := c.GCE[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "gce %q", c.GCE[i].ID)
 		}
 	}
 
 	if err := c.Kubernetes.Validate(); err != nil {
-		return err
+		return errors.Wrap(err, "kubernetes")
 	}
 
 	for i := range c.Marathon {
 		if err := c.Marathon[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "marathon %q", c.Marathon[i].ID)
 		}
 	}
 
 	for i := range c.Nerve {
 		if err := c.Nerve[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "nerve %q", c.Nerve[i].ID)
 		}
 	}
 
 	for i := range c.Serverset {
 		if err := c.Serverset[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "serverset %q", c.Serverset[i].ID)
 		}
 	}
 
 	for i := range c.StaticDiscovery {
 		if err := c.StaticDiscovery[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "static discovery %q", c.StaticDiscovery[i].ID)
 		}
+	}
+
+	if err := c.Swarm.Validate(); err != nil {
+		return errors.Wrap(err, "swarm")
 	}
 
 	for i := range c.Triton {
 		if err := c.Triton[i].Validate(); err != nil {
-			return err
+			return errors.Wrapf(err, "triton %q", c.Triton[i].ID)
 		}
 	}
 
@@ -452,11 +472,17 @@ func (c *Config) applyEnvOverridesToMap(prefix string, fieldDesc string, mapValu
 	return nil
 }
 
+var textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+
 func (c *Config) applyEnvOverrides(prefix string, fieldDesc string, spec reflect.Value) error {
 	// If we have a pointer, dereference it
 	s := spec
 	if spec.Kind() == reflect.Ptr {
 		s = spec.Elem()
+	}
+	var addrSpec reflect.Value
+	if i := reflect.Indirect(s); i.CanAddr() {
+		addrSpec = i.Addr()
 	}
 
 	var value string
@@ -473,26 +499,20 @@ func (c *Config) applyEnvOverrides(prefix string, fieldDesc string, spec reflect
 		}
 	}
 
+	// Check if the type is a test.Unmarshaler
+	if addrSpec.Type().Implements(textUnmarshalerType) {
+		um := addrSpec.Interface().(encoding.TextUnmarshaler)
+		err := um.UnmarshalText([]byte(value))
+		return errors.Wrap(err, "failed to unmarshal env var")
+	}
+
 	switch s.Kind() {
 	case reflect.String:
 		s.SetString(value)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-
-		var intValue int64
-
-		// Handle toml.Duration
-		if s.Type().Name() == "Duration" {
-			dur, err := time.ParseDuration(value)
-			if err != nil {
-				return fmt.Errorf("failed to apply %v%v using type %v and value '%v'", prefix, fieldDesc, s.Type().String(), value)
-			}
-			intValue = dur.Nanoseconds()
-		} else {
-			var err error
-			intValue, err = strconv.ParseInt(value, 0, s.Type().Bits())
-			if err != nil {
-				return fmt.Errorf("failed to apply %v%v using type %v and value '%v'", prefix, fieldDesc, s.Type().String(), value)
-			}
+		intValue, err := strconv.ParseInt(value, 0, s.Type().Bits())
+		if err != nil {
+			return fmt.Errorf("failed to apply %v%v using type %v and value '%v'", prefix, fieldDesc, s.Type().String(), value)
 		}
 
 		s.SetInt(intValue)

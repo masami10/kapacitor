@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
@@ -15,13 +16,11 @@ import (
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	influxcli "github.com/masami10/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/services/diagnostic"
 	"github.com/masami10/kapacitor/services/httpd"
 	"github.com/masami10/kapacitor/services/influxdb"
 	"github.com/masami10/kapacitor/uuid"
-	"github.com/masami10/kapacitor/vars"
 )
-
-var ls = logSerivce{}
 
 const (
 	randomTokenData = "test random data that is 64 bytes long xxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -39,8 +38,14 @@ var (
 	testSubName            = "kapacitor-" + testKapacitorClusterID.String()
 )
 
+var diagService *diagnostic.Service
+
 func init() {
-	vars.ClusterIDVar.Set(testKapacitorClusterID)
+	diagService = diagnostic.NewService(diagnostic.NewConfig(), ioutil.Discard, ioutil.Discard)
+	diagService.Open()
+}
+
+func init() {
 	if len(randomTokenData) != tokenSize {
 		panic(fmt.Sprintf("invalid randomTokenData: got %d exp %d", len(randomTokenData), tokenSize))
 	}
@@ -1159,12 +1164,16 @@ func NewDefaultTestConfigs(clusters []string) []influxdb.Config {
 
 func NewTestService(configs []influxdb.Config, hostname string, useTokens bool) (*influxdb.Service, *authService, *clientCreator) {
 	httpPort := 9092
-	l := ls.NewLogger("[test-influxdb] ", log.LstdFlags)
-	s, err := influxdb.NewService(configs, httpPort, hostname, useTokens, l)
+	d := diagService.NewInfluxDBHandler()
+	s, err := influxdb.NewService(
+		configs,
+		httpPort,
+		hostname,
+		ider{clusterID: testKapacitorClusterID, serverID: uuid.New()},
+		useTokens, d)
 	if err != nil {
 		panic(err)
 	}
-	s.LogService = ls
 	s.HTTPDService = httpdService{}
 	as := &authService{}
 	s.AuthService = as
@@ -1283,4 +1292,16 @@ type randReader struct {
 
 func (randReader) Read(p []byte) (int, error) {
 	return copy(p, []byte(randomTokenData)), nil
+}
+
+type ider struct {
+	clusterID,
+	serverID uuid.UUID
+}
+
+func (i ider) ClusterID() uuid.UUID {
+	return i.clusterID
+}
+func (i ider) ServerID() uuid.UUID {
+	return i.serverID
 }

@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"sync/atomic"
+
+	"github.com/masami10/kapacitor/keyvalue"
 
 	"github.com/masami10/kapacitor/alert"
 	"github.com/pkg/errors"
@@ -20,23 +21,27 @@ import (
 
 const DefaultUrl = "https://oapi.dingtalk.com/robot/send?access_token="
 
+type Diagnostic interface {
+	WithContext(ctx ...keyvalue.T) Diagnostic
+
+
+	Error(msg string, err error)
+}
+
 type Service struct {
 	configValue atomic.Value
 	clientValue atomic.Value
-	logger      *log.Logger
+	diag        Diagnostic
 	client      *http.Client
 }
 
-func NewService(c Config, l *log.Logger) (*Service, error) {
+func NewService(c Config, d Diagnostic) (*Service, error) {
 	tlsConfig, err := getTLSConfig(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
 	if err != nil {
 		return nil, err
 	}
-	if tlsConfig.InsecureSkipVerify {
-		l.Println("W! dingding service is configured to skip ssl verification")
-	}
 	s := &Service{
-		logger: l,
+		diag: d,
 	}
 	s.configValue.Store(c)
 	s.clientValue.Store(&http.Client{
@@ -70,9 +75,6 @@ func (s *Service) Update(newConfig []interface{}) error {
 		tlsConfig, err := getTLSConfig(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
 		if err != nil {
 			return err
-		}
-		if tlsConfig.InsecureSkipVerify {
-			s.logger.Println("W! dingding service is configured to skip ssl verification")
 		}
 		s.configValue.Store(c)
 		s.clientValue.Store(&http.Client{
@@ -258,14 +260,14 @@ type HandlerConfig struct {
 type handler struct {
 	s      *Service
 	c      HandlerConfig
-	logger *log.Logger
+	diag   Diagnostic
 }
 
-func (s *Service) Handler(c HandlerConfig, l *log.Logger) alert.Handler {
+func (s *Service) Handler(c HandlerConfig,  ctx ...keyvalue.T) alert.Handler {
 	return &handler{
 		s:      s,
 		c:      c,
-		logger: l,
+		diag:   s.diag.WithContext(ctx...),
 	}
 }
 
@@ -278,7 +280,7 @@ func (h *handler) Handle(event alert.Event) {
 		event.State.Details,
 		event.State.Level,
 	); err != nil {
-		h.logger.Println("E! failed to send event to dingding", err)
+		h.diag.Error("E! failed to send event to dingding", err)
 	}
 }
 

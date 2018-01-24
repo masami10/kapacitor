@@ -4,7 +4,6 @@ package server
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,16 +16,21 @@ import (
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxdb/services/opentsdb"
 	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/services/dingding"
+	"github.com/masami10/kapacitor/services/iotseed"
+	"github.com/masami10/kapacitor/services/jiguang"
 	"github.com/masami10/kapacitor/auth"
 	"github.com/masami10/kapacitor/command"
 	iclient "github.com/masami10/kapacitor/influxdb"
+	"github.com/masami10/kapacitor/keyvalue"
+	"github.com/masami10/kapacitor/server/vars"
 	"github.com/masami10/kapacitor/services/alert"
 	"github.com/masami10/kapacitor/services/alerta"
 	"github.com/masami10/kapacitor/services/azure"
 	"github.com/masami10/kapacitor/services/config"
 	"github.com/masami10/kapacitor/services/consul"
 	"github.com/masami10/kapacitor/services/deadman"
-	"github.com/masami10/kapacitor/services/dingding"
+	"github.com/masami10/kapacitor/services/diagnostic"
 	"github.com/masami10/kapacitor/services/dns"
 	"github.com/masami10/kapacitor/services/ec2"
 	"github.com/masami10/kapacitor/services/file_discovery"
@@ -35,11 +39,10 @@ import (
 	"github.com/masami10/kapacitor/services/httpd"
 	"github.com/masami10/kapacitor/services/httppost"
 	"github.com/masami10/kapacitor/services/influxdb"
-	"github.com/masami10/kapacitor/services/iotseed"
-	"github.com/masami10/kapacitor/services/jiguang"
 	"github.com/masami10/kapacitor/services/k8s"
-	"github.com/masami10/kapacitor/services/logging"
+	"github.com/masami10/kapacitor/services/load"
 	"github.com/masami10/kapacitor/services/marathon"
+	"github.com/masami10/kapacitor/services/mqtt"
 	"github.com/masami10/kapacitor/services/nerve"
 	"github.com/masami10/kapacitor/services/noauth"
 	"github.com/masami10/kapacitor/services/opsgenie"
@@ -51,12 +54,14 @@ import (
 	"github.com/masami10/kapacitor/services/sensu"
 	"github.com/masami10/kapacitor/services/serverset"
 	"github.com/masami10/kapacitor/services/servicetest"
+	"github.com/masami10/kapacitor/services/sideload"
 	"github.com/masami10/kapacitor/services/slack"
 	"github.com/masami10/kapacitor/services/smtp"
 	"github.com/masami10/kapacitor/services/snmptrap"
 	"github.com/masami10/kapacitor/services/static_discovery"
 	"github.com/masami10/kapacitor/services/stats"
 	"github.com/masami10/kapacitor/services/storage"
+	"github.com/masami10/kapacitor/services/swarm"
 	"github.com/masami10/kapacitor/services/talk"
 	"github.com/masami10/kapacitor/services/task_store"
 	"github.com/masami10/kapacitor/services/telegram"
@@ -65,7 +70,7 @@ import (
 	"github.com/masami10/kapacitor/services/udp"
 	"github.com/masami10/kapacitor/services/victorops"
 	"github.com/masami10/kapacitor/uuid"
-	"github.com/masami10/kapacitor/vars"
+	"github.com/masami10/kapacitor/waiter"
 	"github.com/pkg/errors"
 )
 
@@ -79,6 +84,12 @@ type BuildInfo struct {
 	Branch  string
 }
 
+type Diagnostic interface {
+	Debug(msg string, ctx ...keyvalue.T)
+	Info(msg string, ctx ...keyvalue.T)
+	Error(msg string, err error, ctx ...keyvalue.T)
+}
+
 // Server represents a container for the metadata and storage data and services.
 // It is built using a Config and it manages the startup and shutdown of all
 // services in the proper order.
@@ -90,17 +101,23 @@ type Server struct {
 
 	err chan error
 
+	// clusterIDChanged signals when the cluster ID has changed.
+	clusterIDChanged *waiter.WaiterGroup
+
 	Commander command.Commander
 
 	TaskMaster       *kapacitor.TaskMaster
 	TaskMasterLookup *kapacitor.TaskMasterLookup
 
+	LoadService           *load.Service
+	SideloadService       *sideload.Service
 	AuthService           auth.Interface
 	HTTPDService          *httpd.Service
 	StorageService        *storage.Service
 	AlertService          *alert.Service
 	TaskStore             *task_store.Service
 	ReplayService         *replay.Service
+	SessionService        *diagnostic.SessionService
 	InfluxDBService       *influxdb.Service
 	ConfigOverrideService *config.Service
 	TesterService         *servicetest.Service
@@ -131,33 +148,34 @@ type Server struct {
 	CPUProfile string
 	MemProfile string
 
-	LogService logging.Interface
-	Logger     *log.Logger
+	DiagService *diagnostic.Service
+	Diag        Diagnostic
 }
 
 // New returns a new instance of Server built from a config.
-func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server, error) {
+func New(c *Config, buildInfo BuildInfo, diagService *diagnostic.Service) (*Server, error) {
 	err := c.Validate()
 	if err != nil {
-		return nil, fmt.Errorf("%s. To generate a valid configuration file run `kapacitord config > kapacitor.generated.conf`.", err)
+		return nil, fmt.Errorf("invalid configuration: %s. To generate a valid configuration file run `kapacitord config > kapacitor.generated.conf`.", err)
 	}
-	l := logService.NewLogger("[srv] ", log.LstdFlags)
+	d := diagService.NewServerHandler()
 	s := &Server{
-		config:          c,
-		BuildInfo:       buildInfo,
-		dataDir:         c.DataDir,
-		hostname:        c.Hostname,
-		err:             make(chan error),
-		configUpdates:   make(chan config.ConfigUpdate, 100),
-		LogService:      logService,
-		MetaClient:      &kapacitor.NoopMetaClient{},
-		QueryExecutor:   &Queryexecutor{},
-		Logger:          l,
-		ServicesByName:  make(map[string]int),
-		DynamicServices: make(map[string]Updater),
-		Commander:       c.Commander,
+		config:           c,
+		BuildInfo:        buildInfo,
+		dataDir:          c.DataDir,
+		hostname:         c.Hostname,
+		err:              make(chan error),
+		configUpdates:    make(chan config.ConfigUpdate, 100),
+		DiagService:      diagService,
+		MetaClient:       &kapacitor.NoopMetaClient{},
+		QueryExecutor:    &Queryexecutor{},
+		Diag:             d,
+		ServicesByName:   make(map[string]int),
+		DynamicServices:  make(map[string]Updater),
+		Commander:        c.Commander,
+		clusterIDChanged: waiter.NewGroup(),
 	}
-	s.Logger.Println("I! Kapacitor hostname:", s.hostname)
+	s.Diag.Info("listing Kapacitor hostname", keyvalue.KV("hostname", s.hostname))
 
 	// Setup IDs
 	err = s.setupIDs()
@@ -171,11 +189,13 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	vars.HostVar.Set(s.hostname)
 	vars.ProductVar.Set(vars.Product)
 	vars.VersionVar.Set(s.BuildInfo.Version)
-	s.Logger.Printf("I! ClusterID: %s ServerID: %s", s.ClusterID, s.ServerID)
+	s.Diag.Info("listing ClusterID and ServerID",
+		keyvalue.KV("cluster_id", s.ClusterID.String()), keyvalue.KV("server_id", s.ServerID.String()))
 
 	// Start Task Master
 	s.TaskMasterLookup = kapacitor.NewTaskMasterLookup()
-	s.TaskMaster = kapacitor.NewTaskMaster(kapacitor.MainTaskMaster, logService)
+	kd := diagService.NewKapacitorHandler()
+	s.TaskMaster = kapacitor.NewTaskMaster(kapacitor.MainTaskMaster, vars.Info, kd)
 	s.TaskMaster.DefaultRetentionPolicy = c.DefaultRetentionPolicy
 	s.TaskMaster.Commander = s.Commander
 	s.TaskMasterLookup.Set(s.TaskMaster)
@@ -189,6 +209,7 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	s.appendAuthService()
 	s.appendConfigOverrideService()
 	s.appendTesterService()
+	s.appendSideloadService()
 
 	// Init alert service
 	s.initAlertService()
@@ -204,15 +225,24 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 		return nil, errors.Wrap(err, "influxdb service")
 	}
 
+	if err := s.appendLoadService(); err != nil {
+		return nil, errors.Wrap(err, "load service")
+	}
 
 	// Append Alert integration services
 	s.appendAlertaService()
 	s.appendHipChatService()
+	if err := s.appendMQTTService(); err != nil {
+		return nil, errors.Wrap(err, "mqtt service")
+	}
 	s.appendOpsGenieService()
 	s.appendPagerDutyService()
 	s.appendPushoverService()
 	s.appendJiguangService()
-	s.appendHTTPPostService()
+
+	if err := s.appendHTTPPostService(); err != nil {
+		return nil, errors.Wrap(err, "httppost service")
+	}
 	s.appendSMTPService()
 	s.appendTelegramService()
 	if err := s.appendSlackService(); err != nil {
@@ -232,10 +262,13 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	// Append these after InfluxDB because they depend on it
 	s.appendTaskStoreService()
 	s.appendReplayService()
+	s.appendSessionService()
 
 	// Append third-party integrations
 	// Append extra input services
-	s.appendCollectdService()
+	if err := s.appendCollectdService(); err != nil {
+		return nil, errors.Wrap(err, "collectd service")
+	}
 	s.appendUDPServices()
 	if err := s.appendOpenTSDBService(); err != nil {
 		return nil, errors.Wrap(err, "opentsdb service")
@@ -244,22 +277,22 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 		return nil, errors.Wrap(err, "graphite service")
 	}
 
-	// Append StatsService and ReportingService after other services so all stats are ready
-	// to be reported
-	s.appendStatsService()
-	s.appendReportingService()
-
 	// Append Scraper and discovery services
 	s.appendScraperService()
 
 	if err := s.appendK8sService(); err != nil {
 		return nil, errors.Wrap(err, "kubernetes service")
 	}
+	if err := s.appendSwarmService(); err != nil {
+		return nil, errors.Wrap(err, "docker swarm service")
+	}
+	if err := s.appendEC2Service(); err != nil {
+		return nil, errors.Wrap(err, "Aws service")
+	}
 
 	s.appendAzureService()
 	s.appendConsulService()
 	s.appendDNSService()
-	s.appendEC2Service()
 	s.appendFileService()
 	s.appendGCEService()
 	s.appendMarathonService()
@@ -267,6 +300,11 @@ func New(c *Config, buildInfo BuildInfo, logService logging.Interface) (*Server,
 	s.appendServersetService()
 	s.appendStaticService()
 	s.appendTritonService()
+
+	// Append StatsService and ReportingService after other services so all stats are ready
+	// to be reported
+	s.appendStatsService()
+	s.appendReportingService()
 
 	// Append HTTPD Service last so that the API is not listening till everything else succeeded.
 	s.appendHTTPDService()
@@ -296,8 +334,8 @@ func (s *Server) SetDynamicService(name string, srv dynamicService) {
 }
 
 func (s *Server) appendStorageService() {
-	l := s.LogService.NewLogger("[storage] ", log.LstdFlags)
-	srv := storage.NewService(s.config.Storage, l)
+	d := s.DiagService.NewStorageHandler()
+	srv := storage.NewService(s.config.Storage, d)
 
 	srv.HTTPDService = s.HTTPDService
 
@@ -306,8 +344,8 @@ func (s *Server) appendStorageService() {
 }
 
 func (s *Server) appendConfigOverrideService() {
-	l := s.LogService.NewLogger("[config-override] ", log.LstdFlags)
-	srv := config.NewService(s.config.ConfigOverride, s.config, l, s.configUpdates)
+	d := s.DiagService.NewConfigOverrideHandler()
+	srv := config.NewService(s.config.ConfigOverride, s.config, d, s.configUpdates)
 	srv.HTTPDService = s.HTTPDService
 	srv.StorageService = s.StorageService
 
@@ -316,8 +354,8 @@ func (s *Server) appendConfigOverrideService() {
 }
 
 func (s *Server) initAlertService() {
-	l := s.LogService.NewLogger("[alert] ", log.LstdFlags)
-	srv := alert.NewService(l)
+	d := s.DiagService.NewAlertServiceHandler()
+	srv := alert.NewService(d)
 
 	srv.Commander = s.Commander
 	srv.HTTPDService = s.HTTPDService
@@ -332,18 +370,27 @@ func (s *Server) appendAlertService() {
 }
 
 func (s *Server) appendTesterService() {
-	l := s.LogService.NewLogger("[service-tests] ", log.LstdFlags)
-	srv := servicetest.NewService(servicetest.NewConfig(), l)
+	srv := servicetest.NewService(servicetest.NewConfig())
 	srv.HTTPDService = s.HTTPDService
 
 	s.TesterService = srv
 	s.AppendService("tests", srv)
 }
 
+func (s *Server) appendSideloadService() {
+	d := s.DiagService.NewSideloadHandler()
+	srv := sideload.NewService(d)
+	srv.HTTPDService = s.HTTPDService
+
+	s.SideloadService = srv
+	s.TaskMaster.SideloadService = srv
+	s.AppendService("sideload", srv)
+}
+
 func (s *Server) appendSMTPService() {
 	c := s.config.SMTP
-	l := s.LogService.NewLogger("[smtp] ", log.LstdFlags)
-	srv := smtp.NewService(c, l)
+	d := s.DiagService.NewSMTPHandler()
+	srv := smtp.NewService(c, d)
 
 	s.TaskMaster.SMTPService = srv
 	s.AlertService.SMTPService = srv
@@ -352,20 +399,47 @@ func (s *Server) appendSMTPService() {
 	s.AppendService("smtp", srv)
 }
 
+func (s *Server) appendLoadService() error {
+	c := s.config.Load
+	d := s.DiagService.NewLoadHandler()
+	if s.HTTPDService == nil {
+		return errors.New("httpd service must be set for load service")
+	}
+	if s.HTTPDService.Handler == nil {
+		return errors.New("httpd service handler must be set for load service")
+	}
+	srv, err := load.NewService(c, s.HTTPDService.Handler, d)
+	if err != nil {
+		return err
+	}
+
+	srv.StorageService = s.StorageService
+
+	s.LoadService = srv
+	s.AppendService("load", srv)
+
+	return nil
+}
+
 func (s *Server) appendInfluxDBService() error {
 	c := s.config.InfluxDB
-	l := s.LogService.NewLogger("[influxdb] ", log.LstdFlags)
+	d := s.DiagService.NewInfluxDBHandler()
 	httpPort, err := s.config.HTTP.Port()
 	if err != nil {
 		return errors.Wrap(err, "failed to get http port")
 	}
-	srv, err := influxdb.NewService(c, httpPort, s.config.Hostname, s.config.HTTP.AuthEnabled, l)
+	srv, err := influxdb.NewService(c, httpPort, s.config.Hostname, vars.Info, s.config.HTTP.AuthEnabled, d)
 	if err != nil {
 		return err
 	}
+	w, err := s.newClusterIDChangedWaiter()
+	if err != nil {
+		return err
+	}
+	srv.ClusterIDWaiter = w
+
 	srv.HTTPDService = s.HTTPDService
 	srv.PointsWriter = s.TaskMaster
-	srv.LogService = s.LogService
 	srv.AuthService = s.AuthService
 	srv.ClientCreator = iclient.ClientCreator{}
 
@@ -377,10 +451,11 @@ func (s *Server) appendInfluxDBService() error {
 }
 
 func (s *Server) initHTTPDService() {
-	l := s.LogService.NewLogger("[httpd] ", log.LstdFlags)
-	srv := httpd.NewService(s.config.HTTP, s.hostname, l, s.LogService)
+	d := s.DiagService.NewHTTPDHandler()
+	srv := httpd.NewService(s.config.HTTP, s.hostname, d)
 
 	srv.Handler.PointsWriter = s.TaskMaster
+	srv.Handler.DiagService = s.DiagService
 	srv.Handler.Version = s.BuildInfo.Version
 
 	s.HTTPDService = srv
@@ -392,8 +467,8 @@ func (s *Server) appendHTTPDService() {
 }
 
 func (s *Server) appendTaskStoreService() {
-	l := s.LogService.NewLogger("[task_store] ", log.LstdFlags)
-	srv := task_store.NewService(s.config.Task, l)
+	d := s.DiagService.NewTaskStoreHandler()
+	srv := task_store.NewService(s.config.Task, d)
 	srv.StorageService = s.StorageService
 	srv.HTTPDService = s.HTTPDService
 	srv.TaskMasterLookup = s.TaskMasterLookup
@@ -403,9 +478,16 @@ func (s *Server) appendTaskStoreService() {
 	s.AppendService("task_store", srv)
 }
 
+func (s *Server) appendSessionService() {
+	srv := s.DiagService.SessionService
+	srv.HTTPDService = s.HTTPDService
+
+	s.AppendService("session", srv)
+}
+
 func (s *Server) appendReplayService() {
-	l := s.LogService.NewLogger("[replay] ", log.LstdFlags)
-	srv := replay.NewService(s.config.Replay, l)
+	d := s.DiagService.NewReplayHandler()
+	srv := replay.NewService(s.config.Replay, d)
 	srv.StorageService = s.StorageService
 	srv.TaskStore = s.TaskStore
 	srv.HTTPDService = s.HTTPDService
@@ -419,8 +501,8 @@ func (s *Server) appendReplayService() {
 
 func (s *Server) appendK8sService() error {
 	c := s.config.Kubernetes
-	l := s.LogService.NewLogger("[kubernetes] ", log.LstdFlags)
-	srv, err := k8s.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewK8sHandler()
+	srv, err := k8s.NewService(c, s.ScraperService, d)
 	if err != nil {
 		return err
 	}
@@ -430,11 +512,37 @@ func (s *Server) appendK8sService() error {
 	s.AppendService("kubernetes", srv)
 	return nil
 }
+func (s *Server) appendSwarmService() error {
+	c := s.config.Swarm
+	d := s.DiagService.NewSwarmHandler()
+	srv, err := swarm.NewService(c, d)
+	if err != nil {
+		return err
+	}
+
+	s.TaskMaster.SwarmService = srv
+	s.SetDynamicService("swarm", srv)
+	s.AppendService("swarm", srv)
+	return nil
+}
+func (s *Server) appendEC2Service() error {
+	c := s.config.EC2
+	d := s.DiagService.NewEC2Handler()
+	srv, err := ec2.NewService(c, s.ScraperService, d)
+	if err != nil {
+		return err
+	}
+
+	s.TaskMaster.EC2Service = srv
+	s.SetDynamicService("ec2", srv)
+	s.AppendService("ec2", srv)
+	return nil
+}
 
 func (s *Server) appendIOTSeedService() error {
 	c := s.config.IOTSeed
-	l := s.LogService.NewLogger("[iotseed] ", log.LstdFlags)
-	srv, err := iotseed.NewService(c, l)
+	d := s.DiagService.NewIotseedHandler()
+	srv, err := iotseed.NewService(c, d)
 	if err != nil {
 		return err
 	}
@@ -445,36 +553,51 @@ func (s *Server) appendIOTSeedService() error {
 	s.AppendService("iotseed", srv)
 	return nil
 }
-
 func (s *Server) appendDeadmanService() {
-	l := s.LogService.NewLogger("[deadman] ", log.LstdFlags)
-	srv := deadman.NewService(s.config.Deadman, l)
+	d := s.DiagService.NewDeadmanHandler()
+	srv := deadman.NewService(s.config.Deadman, d)
 
 	s.TaskMaster.DeadmanService = srv
 	s.AppendService("deadman", srv)
 }
 
 func (s *Server) appendUDFService() {
-	l := s.LogService.NewLogger("[udf] ", log.LstdFlags)
-	srv := udf.NewService(s.config.UDF, l)
+	d := s.DiagService.NewUDFServiceHandler()
+	srv := udf.NewService(s.config.UDF, d)
 
 	s.TaskMaster.UDFService = srv
 	s.AppendService("udf", srv)
 }
 
 func (s *Server) appendAuthService() {
-	l := s.LogService.NewLogger("[noauth] ", log.LstdFlags)
-	srv := noauth.NewService(l)
+	d := s.DiagService.NewNoAuthHandler()
+	srv := noauth.NewService(d)
 
 	s.AuthService = srv
 	s.HTTPDService.Handler.AuthService = srv
 	s.AppendService("auth", srv)
 }
 
+func (s *Server) appendMQTTService() error {
+	cs := s.config.MQTT
+	d := s.DiagService.NewMQTTHandler()
+	srv, err := mqtt.NewService(cs, d)
+	if err != nil {
+		return err
+	}
+
+	s.TaskMaster.MQTTService = srv
+	s.AlertService.MQTTService = srv
+
+	s.SetDynamicService("mqtt", srv)
+	s.AppendService("mqtt", srv)
+	return nil
+}
+
 func (s *Server) appendOpsGenieService() {
 	c := s.config.OpsGenie
-	l := s.LogService.NewLogger("[opsgenie] ", log.LstdFlags)
-	srv := opsgenie.NewService(c, l)
+	d := s.DiagService.NewOpsGenieHandler()
+	srv := opsgenie.NewService(c, d)
 
 	s.TaskMaster.OpsGenieService = srv
 	s.AlertService.OpsGenieService = srv
@@ -485,8 +608,8 @@ func (s *Server) appendOpsGenieService() {
 
 func (s *Server) appendVictorOpsService() {
 	c := s.config.VictorOps
-	l := s.LogService.NewLogger("[victorops] ", log.LstdFlags)
-	srv := victorops.NewService(c, l)
+	d := s.DiagService.NewVictorOpsHandler()
+	srv := victorops.NewService(c, d)
 
 	s.TaskMaster.VictorOpsService = srv
 	s.AlertService.VictorOpsService = srv
@@ -497,8 +620,8 @@ func (s *Server) appendVictorOpsService() {
 
 func (s *Server) appendPagerDutyService() {
 	c := s.config.PagerDuty
-	l := s.LogService.NewLogger("[pagerduty] ", log.LstdFlags)
-	srv := pagerduty.NewService(c, l)
+	d := s.DiagService.NewPagerDutyHandler()
+	srv := pagerduty.NewService(c, d)
 	srv.HTTPDService = s.HTTPDService
 
 	s.TaskMaster.PagerDutyService = srv
@@ -510,8 +633,8 @@ func (s *Server) appendPagerDutyService() {
 
 func (s *Server) appendPushoverService() {
 	c := s.config.Pushover
-	l := s.LogService.NewLogger("[pushover] ", log.LstdFlags)
-	srv := pushover.NewService(c, l)
+	d := s.DiagService.NewPushoverHandler()
+	srv := pushover.NewService(c, d)
 
 	s.TaskMaster.PushoverService = srv
 	s.AlertService.PushoverService = srv
@@ -520,22 +643,26 @@ func (s *Server) appendPushoverService() {
 	s.AppendService("pushover", srv)
 }
 
-func (s *Server) appendHTTPPostService() {
+func (s *Server) appendHTTPPostService() error {
 	c := s.config.HTTPPost
-	l := s.LogService.NewLogger("[httppost] ", log.LstdFlags)
-	srv := httppost.NewService(c, l)
+	d := s.DiagService.NewHTTPPostHandler()
+	srv, err := httppost.NewService(c, d)
+	if err != nil {
+		return err
+	}
 
 	s.TaskMaster.HTTPPostService = srv
 	s.AlertService.HTTPPostService = srv
 
 	s.SetDynamicService("httppost", srv)
 	s.AppendService("httppost", srv)
+	return nil
 }
 
 func (s *Server) appendSensuService() {
 	c := s.config.Sensu
-	l := s.LogService.NewLogger("[sensu] ", log.LstdFlags)
-	srv := sensu.NewService(c, l)
+	d := s.DiagService.NewSensuHandler()
+	srv := sensu.NewService(c, d)
 
 	s.TaskMaster.SensuService = srv
 	s.AlertService.SensuService = srv
@@ -546,8 +673,8 @@ func (s *Server) appendSensuService() {
 
 func (s *Server) appendSlackService() error {
 	c := s.config.Slack
-	l := s.LogService.NewLogger("[slack] ", log.LstdFlags)
-	srv, err := slack.NewService(c, l)
+	d := s.DiagService.NewSlackHandler()
+	srv, err := slack.NewService(c, d)
 	if err != nil {
 		return err
 	}
@@ -562,8 +689,8 @@ func (s *Server) appendSlackService() error {
 
 func (s *Server) appendDingdingService() error {
 	c := s.config.Dingding
-	l := s.LogService.NewLogger("[dingding] ", log.LstdFlags)
-	srv, err := dingding.NewService(c, l)
+	d := s.DiagService.NewDingdingHandler()
+	srv, err := dingding.NewService(c, d)
 	if err != nil {
 		return err
 	}
@@ -578,8 +705,8 @@ func (s *Server) appendDingdingService() error {
 
 func (s *Server) appendJiguangService() {
 	c := s.config.Jiguang
-	l := s.LogService.NewLogger("[jiguang] ", log.LstdFlags)
-	srv := jiguang.NewService(c, l)
+	d := s.DiagService.NewJiguangHandler()
+	srv := jiguang.NewService(c, d)
 
 	s.TaskMaster.JiguangService = srv
 	s.AlertService.JiguangService = srv
@@ -594,8 +721,8 @@ func (s *Server) appendJiguangService() {
 
 func (s *Server) appendSNMPTrapService() {
 	c := s.config.SNMPTrap
-	l := s.LogService.NewLogger("[snmptrap] ", log.LstdFlags)
-	srv := snmptrap.NewService(c, l)
+	d := s.DiagService.NewSNMPTrapHandler()
+	srv := snmptrap.NewService(c, d)
 
 	s.TaskMaster.SNMPTrapService = srv
 	s.AlertService.SNMPTrapService = srv
@@ -606,8 +733,8 @@ func (s *Server) appendSNMPTrapService() {
 
 func (s *Server) appendTelegramService() {
 	c := s.config.Telegram
-	l := s.LogService.NewLogger("[telegram] ", log.LstdFlags)
-	srv := telegram.NewService(c, l)
+	d := s.DiagService.NewTelegramHandler()
+	srv := telegram.NewService(c, d)
 
 	s.TaskMaster.TelegramService = srv
 	s.AlertService.TelegramService = srv
@@ -618,8 +745,8 @@ func (s *Server) appendTelegramService() {
 
 func (s *Server) appendHipChatService() {
 	c := s.config.HipChat
-	l := s.LogService.NewLogger("[hipchat] ", log.LstdFlags)
-	srv := hipchat.NewService(c, l)
+	d := s.DiagService.NewHipChatHandler()
+	srv := hipchat.NewService(c, d)
 
 	s.TaskMaster.HipChatService = srv
 	s.AlertService.HipChatService = srv
@@ -630,8 +757,8 @@ func (s *Server) appendHipChatService() {
 
 func (s *Server) appendAlertaService() {
 	c := s.config.Alerta
-	l := s.LogService.NewLogger("[alerta] ", log.LstdFlags)
-	srv := alerta.NewService(c, l)
+	d := s.DiagService.NewAlertaHandler()
+	srv := alerta.NewService(c, d)
 
 	s.TaskMaster.AlertaService = srv
 	s.AlertService.AlertaService = srv
@@ -642,8 +769,8 @@ func (s *Server) appendAlertaService() {
 
 func (s *Server) appendTalkService() {
 	c := s.config.Talk
-	l := s.LogService.NewLogger("[talk] ", log.LstdFlags)
-	srv := talk.NewService(c, l)
+	d := s.DiagService.NewTalkHandler()
+	srv := talk.NewService(c, d)
 
 	s.TaskMaster.TalkService = srv
 	s.AlertService.TalkService = srv
@@ -652,18 +779,23 @@ func (s *Server) appendTalkService() {
 	s.AppendService("talk", srv)
 }
 
-func (s *Server) appendCollectdService() {
+func (s *Server) appendCollectdService() error {
 	c := s.config.Collectd
 	if !c.Enabled {
-		return
+		return nil
 	}
 	srv := collectd.NewService(c)
-	w := s.LogService.NewStaticLevelWriter(logging.INFO)
+	w, err := s.DiagService.NewStaticLevelHandler("info", "collectd")
+	if err != nil {
+		return fmt.Errorf("failed to create static level handler for collectd: %v", err)
+	}
 	srv.SetLogOutput(w)
 
 	srv.MetaClient = s.MetaClient
 	srv.PointsWriter = s.TaskMaster
 	s.AppendService("collectd", srv)
+
+	return nil
 }
 
 func (s *Server) appendOpenTSDBService() error {
@@ -675,7 +807,10 @@ func (s *Server) appendOpenTSDBService() error {
 	if err != nil {
 		return err
 	}
-	w := s.LogService.NewStaticLevelWriter(logging.INFO)
+	w, err := s.DiagService.NewStaticLevelHandler("info", "opentsdb")
+	if err != nil {
+		return fmt.Errorf("failed to create static level handler for opentsdb: %v", err)
+	}
 	srv.SetLogOutput(w)
 
 	srv.PointsWriter = s.TaskMaster
@@ -693,7 +828,10 @@ func (s *Server) appendGraphiteServices() error {
 		if err != nil {
 			return errors.Wrap(err, "creating new graphite service")
 		}
-		w := s.LogService.NewStaticLevelWriter(logging.INFO)
+		w, err := s.DiagService.NewStaticLevelHandler("info", "graphite")
+		if err != nil {
+			return fmt.Errorf("failed to create static level handler for graphite: %v", err)
+		}
 		srv.SetLogOutput(w)
 
 		srv.PointsWriter = s.TaskMaster
@@ -708,8 +846,8 @@ func (s *Server) appendUDPServices() {
 		if !c.Enabled {
 			continue
 		}
-		l := s.LogService.NewLogger("[udp] ", log.LstdFlags)
-		srv := udp.NewService(c, l)
+		d := s.DiagService.NewUDPHandler()
+		srv := udp.NewService(c, d)
 		srv.PointsWriter = s.TaskMaster
 		s.AppendService(fmt.Sprintf("udp%d", i), srv)
 	}
@@ -718,8 +856,8 @@ func (s *Server) appendUDPServices() {
 func (s *Server) appendStatsService() {
 	c := s.config.Stats
 	if c.Enabled {
-		l := s.LogService.NewLogger("[stats] ", log.LstdFlags)
-		srv := stats.NewService(c, l)
+		d := s.DiagService.NewStatsHandler()
+		srv := stats.NewService(c, d)
 		srv.TaskMaster = s.TaskMaster
 
 		s.StatsService = srv
@@ -731,8 +869,8 @@ func (s *Server) appendStatsService() {
 func (s *Server) appendReportingService() {
 	c := s.config.Reporting
 	if c.Enabled {
-		l := s.LogService.NewLogger("[reporting] ", log.LstdFlags)
-		srv := reporting.NewService(c, l)
+		d := s.DiagService.NewReportingHandler()
+		srv := reporting.NewService(c, vars.Info, d)
 
 		s.AppendService("reporting", srv)
 	}
@@ -740,8 +878,8 @@ func (s *Server) appendReportingService() {
 
 func (s *Server) appendScraperService() {
 	c := s.config.Scraper
-	l := s.LogService.NewLogger("[scrapers] ", log.LstdFlags)
-	srv := scraper.NewService(c, l)
+	d := s.DiagService.NewScraperHandler()
+	srv := scraper.NewService(c, d)
 	srv.PointsWriter = s.TaskMaster
 	s.ScraperService = srv
 	s.SetDynamicService("scraper", srv)
@@ -750,88 +888,80 @@ func (s *Server) appendScraperService() {
 
 func (s *Server) appendAzureService() {
 	c := s.config.Azure
-	l := s.LogService.NewLogger("[azure] ", log.LstdFlags)
-	srv := azure.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewAzureHandler()
+	srv := azure.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("azure", srv)
 	s.AppendService("azure", srv)
 }
 
 func (s *Server) appendConsulService() {
 	c := s.config.Consul
-	l := s.LogService.NewLogger("[consul] ", log.LstdFlags)
-	srv := consul.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewConsulHandler()
+	srv := consul.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("consul", srv)
 	s.AppendService("consul", srv)
 }
 
 func (s *Server) appendDNSService() {
 	c := s.config.DNS
-	l := s.LogService.NewLogger("[dns] ", log.LstdFlags)
-	srv := dns.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewDNSHandler()
+	srv := dns.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("dns", srv)
 	s.AppendService("dns", srv)
 }
 
-func (s *Server) appendEC2Service() {
-	c := s.config.EC2
-	l := s.LogService.NewLogger("[ec2] ", log.LstdFlags)
-	srv := ec2.NewService(c, s.ScraperService, l)
-	s.SetDynamicService("ec2", srv)
-	s.AppendService("ec2", srv)
-}
-
 func (s *Server) appendFileService() {
 	c := s.config.FileDiscovery
-	l := s.LogService.NewLogger("[file-discovery] ", log.LstdFlags)
-	srv := file_discovery.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewFileDiscoveryHandler()
+	srv := file_discovery.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("file-discovery", srv)
 	s.AppendService("file-discovery", srv)
 }
 
 func (s *Server) appendGCEService() {
 	c := s.config.GCE
-	l := s.LogService.NewLogger("[gce] ", log.LstdFlags)
-	srv := gce.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewGCEHandler()
+	srv := gce.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("gce", srv)
 	s.AppendService("gce", srv)
 }
 
 func (s *Server) appendMarathonService() {
 	c := s.config.Marathon
-	l := s.LogService.NewLogger("[marathon] ", log.LstdFlags)
-	srv := marathon.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewMarathonHandler()
+	srv := marathon.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("marathon", srv)
 	s.AppendService("marathon", srv)
 }
 
 func (s *Server) appendNerveService() {
 	c := s.config.Nerve
-	l := s.LogService.NewLogger("[nerve] ", log.LstdFlags)
-	srv := nerve.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewNerveHandler()
+	srv := nerve.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("nerve", srv)
 	s.AppendService("nerve", srv)
 }
 
 func (s *Server) appendServersetService() {
 	c := s.config.Serverset
-	l := s.LogService.NewLogger("[serverset] ", log.LstdFlags)
-	srv := serverset.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewServersetHandler()
+	srv := serverset.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("serverset", srv)
 	s.AppendService("serverset", srv)
 }
 
 func (s *Server) appendStaticService() {
 	c := s.config.StaticDiscovery
-	l := s.LogService.NewLogger("[static-discovery] ", log.LstdFlags)
-	srv := static_discovery.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewStaticDiscoveryHandler()
+	srv := static_discovery.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("static-discovery", srv)
 	s.AppendService("static-discovery", srv)
 }
 
 func (s *Server) appendTritonService() {
 	c := s.config.Triton
-	l := s.LogService.NewLogger("[triton] ", log.LstdFlags)
-	srv := triton.NewService(c, s.ScraperService, l)
+	d := s.DiagService.NewTritonHandler()
+	srv := triton.NewService(c, s.ScraperService, d)
 	s.SetDynamicService("triton", srv)
 	s.AppendService("triton", srv)
 }
@@ -852,6 +982,10 @@ func (s *Server) Open() error {
 		return err
 	}
 
+	if err := s.LoadService.Load(); err != nil {
+		return fmt.Errorf("failed to reload tasks/templates/handlers: %v", err)
+	}
+
 	go s.watchServices()
 	go s.watchConfigUpdates()
 
@@ -860,16 +994,16 @@ func (s *Server) Open() error {
 
 func (s *Server) startServices() error {
 	for _, service := range s.Services {
-		s.Logger.Printf("D! opening service: %T", service)
+		s.Diag.Debug("opening service", keyvalue.KV("service", fmt.Sprintf("%T", service)))
 		if err := service.Open(); err != nil {
 			return fmt.Errorf("open service %T: %s", service, err)
 		}
-		s.Logger.Printf("D! opened service: %T", service)
+		s.Diag.Debug("opened service", keyvalue.KV("service", fmt.Sprintf("%T", service)))
 
 		// Apply config overrides after the config override service has been opened and before any dynamic services.
 		if service == s.ConfigOverrideService && !s.config.SkipConfigOverrides && s.config.ConfigOverride.Enabled {
 			// Apply initial config updates
-			s.Logger.Println("D! applying configuration overrides")
+			s.Diag.Debug("applying config overrides")
 			configs, err := s.ConfigOverrideService.Config()
 			if err != nil {
 				return errors.Wrap(err, "failed to apply config overrides")
@@ -878,7 +1012,7 @@ func (s *Server) startServices() error {
 				if srv, ok := s.DynamicServices[service]; !ok {
 					return fmt.Errorf("found configuration override for unknown service %q", service)
 				} else {
-					s.Logger.Println("D! applying configuration overrides for", service)
+					s.Diag.Debug("applying config overrides for service", keyvalue.KV("service", service))
 					if err := srv.Update(config); err != nil {
 						return errors.Wrapf(err, "failed to update configuration for service %s", service)
 					}
@@ -911,14 +1045,15 @@ func (s *Server) watchConfigUpdates() {
 // Close shuts down the meta and data stores and all services.
 func (s *Server) Close() error {
 	s.stopProfile()
+	s.clusterIDChanged.Stop()
 
 	// Close all services that write points first.
 	if err := s.HTTPDService.Close(); err != nil {
-		s.Logger.Printf("E! error closing httpd service: %v", err)
+		s.Diag.Error("error closing httpd service", err)
 	}
 	if s.StatsService != nil {
 		if err := s.StatsService.Close(); err != nil {
-			s.Logger.Printf("E! error closing stats service: %v", err)
+			s.Diag.Error("error closing stats service", err)
 		}
 	}
 
@@ -929,12 +1064,12 @@ func (s *Server) Close() error {
 	// Close services now that all tasks are stopped.
 	for i := len(s.Services) - 1; i >= 0; i-- {
 		service := s.Services[i]
-		s.Logger.Printf("D! closing service: %T", service)
+		s.Diag.Debug("closing service", keyvalue.KV("service", fmt.Sprintf("%T", service)))
 		err := service.Close()
 		if err != nil {
-			s.Logger.Printf("E! error closing service %T: %v", service, err)
+			s.Diag.Error("error closing service", err, keyvalue.KV("service", fmt.Sprintf("%T", service)))
 		}
-		s.Logger.Printf("D! closed service: %T", service)
+		s.Diag.Debug("closed service", keyvalue.KV("service", fmt.Sprintf("%T", service)))
 	}
 
 	// Finally close the task master
@@ -1009,6 +1144,15 @@ func (s *Server) writeID(file string, id uuid.UUID) error {
 	return nil
 }
 
+func (s *Server) Reload() {
+	if err := s.LoadService.Load(); err != nil {
+		s.Diag.Error("failed to reload tasks/templates/handlers", err)
+	}
+	if err := s.SideloadService.Reload(); err != nil {
+		s.Diag.Error("failed to reload sideload sources", err)
+	}
+}
+
 func (s *Server) SetClusterID(clusterID uuid.UUID) error {
 	s.clusterIDMu.Lock()
 	defer s.clusterIDMu.Unlock()
@@ -1021,7 +1165,12 @@ func (s *Server) SetClusterID(clusterID uuid.UUID) error {
 	}
 	s.ClusterID = clusterID
 	vars.ClusterIDVar.Set(s.ClusterID)
+	s.clusterIDChanged.Broadcast()
 	return nil
+}
+
+func (s *Server) newClusterIDChangedWaiter() (waiter.Waiter, error) {
+	return s.clusterIDChanged.NewWaiter()
 }
 
 // Service represents a service attached to the server.
@@ -1048,7 +1197,7 @@ func (s *Server) startProfile(cpuprofile, memprofile string) error {
 		if err != nil {
 			return fmt.Errorf("E! cpuprofile: %v", err)
 		}
-		s.Logger.Printf("I! writing CPU profile to: %s\n", cpuprofile)
+		s.Diag.Info("writing CPU profile", keyvalue.KV("file", cpuprofile))
 		prof.cpu = f
 		if err := pprof.StartCPUProfile(prof.cpu); err != nil {
 			return fmt.Errorf("#! start cpu profile: %v", err)
@@ -1060,7 +1209,7 @@ func (s *Server) startProfile(cpuprofile, memprofile string) error {
 		if err != nil {
 			return fmt.Errorf("E! memprofile: %v", err)
 		}
-		s.Logger.Printf("I! writing mem profile to: %s\n", memprofile)
+		s.Diag.Info("writing mem profile", keyvalue.KV("file", memprofile))
 		prof.mem = f
 		runtime.MemProfileRate = 4096
 	}
@@ -1072,14 +1221,14 @@ func (s *Server) stopProfile() {
 	if prof.cpu != nil {
 		pprof.StopCPUProfile()
 		prof.cpu.Close()
-		s.Logger.Println("I! CPU profile stopped")
+		s.Diag.Info("CPU profile stopped")
 	}
 	if prof.mem != nil {
 		if err := pprof.Lookup("heap").WriteTo(prof.mem, 0); err != nil {
-			s.Logger.Printf("I! failed to write mem profile: %v\n", err)
+			s.Diag.Error("failed to write mem profile", err)
 		}
 		prof.mem.Close()
-		s.Logger.Println("I! mem profile stopped")
+		s.Diag.Info("mem profile stopped")
 	}
 }
 

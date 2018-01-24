@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"path"
 	"regexp"
@@ -26,6 +25,10 @@ const (
 	updateTimeout = 5 * time.Second
 )
 
+type Diagnostic interface {
+	Error(msg string, err error)
+}
+
 type ConfigUpdate struct {
 	Name      string
 	NewConfig []interface{}
@@ -35,7 +38,7 @@ type ConfigUpdate struct {
 type Service struct {
 	enabled bool
 	config  interface{}
-	logger  *log.Logger
+	diag    Diagnostic
 	updates chan<- ConfigUpdate
 	routes  []httpd.Route
 
@@ -54,11 +57,11 @@ type Service struct {
 	}
 }
 
-func NewService(c Config, config interface{}, l *log.Logger, updates chan<- ConfigUpdate) *Service {
+func NewService(c Config, config interface{}, d Diagnostic, updates chan<- ConfigUpdate) *Service {
 	return &Service{
 		enabled: c.Enabled,
 		config:  config,
-		logger:  l,
+		diag:    d,
 		updates: updates,
 	}
 }
@@ -305,7 +308,9 @@ func (s *Service) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if !hasSection {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(config)
+		if err := json.NewEncoder(w).Encode(config); err != nil {
+			s.diag.Error("failed to JSON encode configuration", err)
+		}
 	} else if section != "" {
 		sec, ok := config.Sections[section]
 		if !ok {
@@ -326,14 +331,18 @@ func (s *Service) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			if found {
 				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(elementEntry)
+				if err := json.NewEncoder(w).Encode(elementEntry); err != nil {
+					s.diag.Error("failed to JSON encode element", err)
+				}
 			} else {
 				httpd.HttpError(w, fmt.Sprintf("unknown section/element: %s/%s", section, element), true, http.StatusNotFound)
 				return
 			}
 		} else {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(sec)
+			if err := json.NewEncoder(w).Encode(sec); err != nil {
+				s.diag.Error("failed to JSON encode sec", err)
+			}
 		}
 	}
 }

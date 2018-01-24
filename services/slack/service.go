@@ -2,37 +2,44 @@ package slack
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"sync/atomic"
 
 	"github.com/masami10/kapacitor/alert"
+	"github.com/masami10/kapacitor/keyvalue"
+	"github.com/masami10/kapacitor/tlsconfig"
 	"github.com/pkg/errors"
 )
+
+type Diagnostic interface {
+	WithContext(ctx ...keyvalue.T) Diagnostic
+
+	InsecureSkipVerify()
+
+	Error(msg string, err error)
+}
 
 type Service struct {
 	configValue atomic.Value
 	clientValue atomic.Value
-	logger      *log.Logger
+	diag        Diagnostic
 	client      *http.Client
 }
 
-func NewService(c Config, l *log.Logger) (*Service, error) {
-	tlsConfig, err := getTLSConfig(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
+func NewService(c Config, d Diagnostic) (*Service, error) {
+	tlsConfig, err := tlsconfig.Create(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
 	if err != nil {
 		return nil, err
 	}
 	if tlsConfig.InsecureSkipVerify {
-		l.Println("W! Slack service is configured to skip ssl verification")
+		d.InsecureSkipVerify()
 	}
 	s := &Service{
-		logger: l,
+		diag: d,
 	}
 	s.configValue.Store(c)
 	s.clientValue.Store(&http.Client{
@@ -63,12 +70,12 @@ func (s *Service) Update(newConfig []interface{}) error {
 	if c, ok := newConfig[0].(Config); !ok {
 		return fmt.Errorf("expected config object to be of type %T, got %T", c, newConfig[0])
 	} else {
-		tlsConfig, err := getTLSConfig(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
+		tlsConfig, err := tlsconfig.Create(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
 		if err != nil {
 			return err
 		}
 		if tlsConfig.InsecureSkipVerify {
-			s.logger.Println("W! Slack service is configured to skip ssl verification")
+			s.diag.InsecureSkipVerify()
 		}
 		s.configValue.Store(c)
 		s.clientValue.Store(&http.Client{
@@ -217,16 +224,16 @@ type HandlerConfig struct {
 }
 
 type handler struct {
-	s      *Service
-	c      HandlerConfig
-	logger *log.Logger
+	s    *Service
+	c    HandlerConfig
+	diag Diagnostic
 }
 
-func (s *Service) Handler(c HandlerConfig, l *log.Logger) alert.Handler {
+func (s *Service) Handler(c HandlerConfig, ctx ...keyvalue.T) alert.Handler {
 	return &handler{
-		s:      s,
-		c:      c,
-		logger: l,
+		s:    s,
+		c:    c,
+		diag: s.diag.WithContext(ctx...),
 	}
 }
 
@@ -238,42 +245,6 @@ func (h *handler) Handle(event alert.Event) {
 		h.c.IconEmoji,
 		event.State.Level,
 	); err != nil {
-		h.logger.Println("E! failed to send event to Slack", err)
+		h.diag.Error("failed to send event", err)
 	}
-}
-
-// getTLSConfig creates a tls.Config object from the given certs, key, and CA files.
-// you must give the full path to the files.
-func getTLSConfig(
-	SSLCA, SSLCert, SSLKey string,
-	InsecureSkipVerify bool,
-) (*tls.Config, error) {
-	t := &tls.Config{
-		InsecureSkipVerify: InsecureSkipVerify,
-	}
-	if SSLCert != "" && SSLKey != "" {
-		cert, err := tls.LoadX509KeyPair(SSLCert, SSLKey)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"Could not load TLS client key/certificate: %s",
-				err)
-		}
-		t.Certificates = []tls.Certificate{cert}
-	} else if SSLCert != "" {
-		return nil, errors.New("Must provide both key and cert files: only cert file provided.")
-	} else if SSLKey != "" {
-		return nil, errors.New("Must provide both key and cert files: only key file provided.")
-	}
-
-	if SSLCA != "" {
-		caCert, err := ioutil.ReadFile(SSLCA)
-		if err != nil {
-			return nil, fmt.Errorf("Could not load TLS CA: %s",
-				err)
-		}
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
-		t.RootCAs = caCertPool
-	}
-	return t, nil
 }

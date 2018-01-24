@@ -23,15 +23,19 @@
 package stats
 
 import (
-	"log"
 	"sync"
 	"time"
 
 	"github.com/masami10/kapacitor"
+	"github.com/masami10/kapacitor/edge"
 	"github.com/masami10/kapacitor/models"
+	"github.com/masami10/kapacitor/server/vars"
 	"github.com/masami10/kapacitor/timer"
-	"github.com/masami10/kapacitor/vars"
 )
+
+type Diagnostic interface {
+	Error(msg string, err error)
+}
 
 // Sends internal stats back into the Kapacitor stream.
 // Internal stats come from running tasks and other
@@ -55,17 +59,17 @@ type Service struct {
 	mu      sync.Mutex
 	wg      sync.WaitGroup
 
-	logger *log.Logger
+	diag Diagnostic
 }
 
-func NewService(c Config, l *log.Logger) *Service {
+func NewService(c Config, d Diagnostic) *Service {
 	return &Service{
 		interval:            time.Duration(c.StatsInterval),
 		db:                  c.Database,
 		rp:                  c.RetentionPolicy,
 		timingSampleRate:    c.TimingSampleRate,
 		timingMovingAvgSize: c.TimingMovingAverageSize,
-		logger:              l,
+		diag:                d,
 	}
 }
 
@@ -114,19 +118,19 @@ func (s *Service) reportStats() {
 	now := time.Now().UTC()
 	data, err := vars.GetStatsData()
 	if err != nil {
-		s.logger.Println("E! error getting stats data:", err)
+		s.diag.Error("error getting stats data", err)
 		return
 	}
 	for _, stat := range data {
-		p := models.Point{
-			Database:        s.db,
-			RetentionPolicy: s.rp,
-			Name:            stat.Name,
-			Group:           models.NilGroup,
-			Tags:            models.Tags(stat.Tags),
-			Time:            now,
-			Fields:          models.Fields(stat.Values),
-		}
+		p := edge.NewPointMessage(
+			stat.Name,
+			s.db,
+			s.rp,
+			models.Dimensions{},
+			models.Fields(stat.Values),
+			models.Tags(stat.Tags),
+			now,
+		)
 		s.stream.CollectPoint(p)
 	}
 }

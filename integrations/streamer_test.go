@@ -2,10 +2,12 @@ package integrations
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"html"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/mail"
@@ -18,7 +20,10 @@ import (
 	"text/template"
 	"time"
 
+	"math/rand"
+
 	"github.com/davecgh/go-spew/spew"
+	"github.com/docker/docker/api/types/swarm"
 	"github.com/influxdata/influxdb/client"
 	imodels "github.com/influxdata/influxdb/models"
 	"github.com/masami10/kapacitor"
@@ -26,17 +31,20 @@ import (
 	"github.com/masami10/kapacitor/clock"
 	"github.com/masami10/kapacitor/command"
 	"github.com/masami10/kapacitor/command/commandtest"
+	"github.com/masami10/kapacitor/edge"
+	"github.com/masami10/kapacitor/keyvalue"
 	"github.com/masami10/kapacitor/models"
 	alertservice "github.com/masami10/kapacitor/services/alert"
 	"github.com/masami10/kapacitor/services/alert/alerttest"
 	"github.com/masami10/kapacitor/services/alerta"
 	"github.com/masami10/kapacitor/services/alerta/alertatest"
+	"github.com/masami10/kapacitor/services/diagnostic"
 	"github.com/masami10/kapacitor/services/hipchat"
 	"github.com/masami10/kapacitor/services/hipchat/hipchattest"
 	"github.com/masami10/kapacitor/services/httppost"
 	"github.com/masami10/kapacitor/services/httppost/httpposttest"
 	k8s "github.com/masami10/kapacitor/services/k8s/client"
-	"github.com/masami10/kapacitor/services/logging/loggingtest"
+	"github.com/masami10/kapacitor/services/k8s/k8stest"
 	"github.com/masami10/kapacitor/services/opsgenie"
 	"github.com/masami10/kapacitor/services/opsgenie/opsgenietest"
 	"github.com/masami10/kapacitor/services/pagerduty"
@@ -45,6 +53,7 @@ import (
 	"github.com/masami10/kapacitor/services/pushover/pushovertest"
 	"github.com/masami10/kapacitor/services/sensu"
 	"github.com/masami10/kapacitor/services/sensu/sensutest"
+	"github.com/masami10/kapacitor/services/sideload"
 	"github.com/masami10/kapacitor/services/slack"
 	"github.com/masami10/kapacitor/services/slack/slacktest"
 	"github.com/masami10/kapacitor/services/smtp"
@@ -52,6 +61,7 @@ import (
 	"github.com/masami10/kapacitor/services/snmptrap"
 	"github.com/masami10/kapacitor/services/snmptrap/snmptraptest"
 	"github.com/masami10/kapacitor/services/storage/storagetest"
+	"github.com/masami10/kapacitor/services/swarm/swarmtest"
 	"github.com/masami10/kapacitor/services/talk"
 	"github.com/masami10/kapacitor/services/talk/talktest"
 	"github.com/masami10/kapacitor/services/telegram"
@@ -65,7 +75,17 @@ import (
 	"github.com/k-sone/snmpgo"
 )
 
-var logService = loggingtest.New()
+var diagService *diagnostic.Service
+
+func init() {
+	flag.Parse()
+	out := ioutil.Discard
+	if testing.Verbose() {
+		out = os.Stderr
+	}
+	diagService = diagnostic.NewService(diagnostic.NewConfig(), out, out)
+	diagService.Open()
+}
 
 var dbrps = []kapacitor.DBRP{
 	{
@@ -1442,6 +1462,825 @@ stream
 	testStreamerWithOutput(t, "TestStream_Window_FillPeriod_Aligned", script, 21*time.Second, er, false, nil)
 }
 
+func TestStream_Barrier_Idle_No_Data(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC())
+	requestCount := int32(0)
+
+	testValues := make([][]interface{}, 1)
+	for i := 0; i < 1; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 2s
+var idle = 2s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().idle(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Idle_No_Data", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		if rc := atomic.LoadInt32(&requestCount); rc != 2 {
+			t.Errorf("got %v exp %v", rc, 2)
+		}
+	}()
+
+	// groupedconsumers do not run any logic until at least one message is seen
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+
+	time.Sleep(5 * time.Second)
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Idle(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC().Add(-22 * time.Second))
+	clock.Set(time.Now().UTC())
+	testValues := make([][]interface{}, 21)
+	for i := 0; i < 21; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+	requestCount := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[0:10],
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[6:20],
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[16:21],
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 10s
+var idle = 10s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().idle(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Idle", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// Force emit should force the last window to emit
+		if rc := atomic.LoadInt32(&requestCount); rc != 3 {
+			t.Errorf("got %v exp %v", rc, 3)
+		}
+	}()
+
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	time.Sleep(11 * time.Second)
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Idle_No_Idle(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC().Add(-22 * time.Second))
+	clock.Set(time.Now().UTC())
+	testValues := make([][]interface{}, 21)
+	for i := 0; i < 21; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+	requestCount := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[0:10],
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[6:20],
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[16:21],
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 10s
+var idle = 10s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().idle(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Idle_No_Idle", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// Force emit should force the last window to emit
+		if rc := atomic.LoadInt32(&requestCount); rc != 2 {
+			t.Errorf("got %v exp %v", rc, 2)
+		}
+	}()
+
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Idle_Replay_After_Idle(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC().Add(-22 * time.Second))
+	clock.Set(time.Now().UTC())
+	testValues := make([][]interface{}, 21)
+	for i := 0; i < 21; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+	requestCount := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[0:10],
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[6:20],
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[16:21],
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 10s
+var idle = 10s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().idle(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Idle", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// Force emit should force the last window to emit
+		if rc := atomic.LoadInt32(&requestCount); rc != 3 {
+			t.Errorf("got %v exp %v", rc, 3)
+		}
+	}()
+
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	time.Sleep(11 * time.Second)
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Period_No_Data(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC())
+	requestCount := int32(0)
+
+	testValues := make([][]interface{}, 1)
+	for i := 0; i < 1; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+	}))
+	defer ts.Close()
+
+	// NOTE: using a slightly higher than 2s idle because timer was going off within a few ms of window period 50% of
+	// the time
+	var script = `
+var period = 14s
+var every = 2s
+var idle = 2100ms
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().period(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Period_No_Data", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// barrier should emit at least 4 times
+		if rc := atomic.LoadInt32(&requestCount); rc != 2 {
+			t.Errorf("got %v exp %v", rc, 2)
+		}
+	}()
+
+	// groupedconsumers do not run any logic until at least one message is seen
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+
+	time.Sleep(5 * time.Second)
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Period(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC().Add(-22 * time.Second))
+	clock.Set(time.Now().UTC())
+	testValues := make([][]interface{}, 21)
+	for i := 0; i < 21; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+	requestCount := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[0:10],
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[6:20],
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[16:21],
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 10s
+var idle = 10s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().period(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Period", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// Force emit should force the last window to emit
+		if rc := atomic.LoadInt32(&requestCount); rc != 3 {
+			t.Errorf("got %v exp %v", rc, 3)
+		}
+	}()
+
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	time.Sleep(11 * time.Second)
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Period_No_Idle(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC().Add(-22 * time.Second))
+	clock.Set(time.Now().UTC())
+	testValues := make([][]interface{}, 21)
+	for i := 0; i < 21; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+	requestCount := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[0:10],
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[6:20],
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[16:21],
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 10s
+var idle = 10s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().period(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Period_No_Idle", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// Force emit should force the last window to emit
+		if rc := atomic.LoadInt32(&requestCount); rc != 2 {
+			t.Errorf("got %v exp %v", rc, 2)
+		}
+	}()
+
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	close(dataChannel)
+}
+
+func TestStream_Barrier_Period_Replay_After_Idle(t *testing.T) {
+	// Set up clock to current time - 22 seconds since we're going to send 21 data points
+	clock := clock.New(time.Now().UTC().Add(-22 * time.Second))
+	clock.Set(time.Now().UTC())
+	testValues := make([][]interface{}, 21)
+	for i := 0; i < 21; i++ {
+		testValues[i] = []interface{}{
+			clock.Zero().Add(time.Duration(i) * time.Second),
+			rand.Float64(),
+		}
+	}
+	requestCount := int32(0)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[0:10],
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[6:20],
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu",
+						Columns: []string{"time", "value"},
+						Values:  testValues[16:21],
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+var period = 14s
+var every = 10s
+var idle = 10s
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('cpu')
+	|barrier().period(idle)
+	|window()
+		.period(period)
+		.every(every)
+	|httpPost('` + ts.URL + `')
+`
+
+	dataChannel := make(chan edge.PointMessage)
+	cleanupTest := testStreamerWithInputChannel(t, "TestStream_Barrier_Period", script, dataChannel, clock, nil)
+	defer func() {
+		cleanupTest()
+
+		// Force emit should force the last window to emit
+		if rc := atomic.LoadInt32(&requestCount); rc != 3 {
+			t.Errorf("got %v exp %v", rc, 3)
+		}
+	}()
+
+	data := make([]edge.PointMessage, len(testValues))
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	time.Sleep(11 * time.Second)
+	for i, testValue := range testValues {
+		data[i] = edge.NewPointMessage(
+			"cpu",
+			"dbname",
+			"rpname",
+			models.Dimensions{},
+			models.Fields{"value": testValue[1]},
+			models.Tags{},
+			testValue[0].(time.Time),
+		)
+	}
+	for _, point := range data {
+		dataChannel <- point
+	}
+	close(dataChannel)
+}
+
 func TestStream_Aggregate_Changing_Type(t *testing.T) {
 
 	var script = `
@@ -2552,7 +3391,190 @@ stream
 		c := httppost.Config{}
 		c.URL = ts.URL
 		c.Endpoint = "test"
-		sl := httppost.NewService(httppost.Configs{c}, logService.NewLogger("[test_httppost_endpoint] ", log.LstdFlags))
+		sl, _ := httppost.NewService(httppost.Configs{c}, diagService.NewHTTPPostHandler())
+		tm.HTTPPostService = sl
+	}
+
+	testStreamerWithOutput(t, "TestStream_HttpPost", script, 13*time.Second, er, false, tmInit)
+
+	if rc := atomic.LoadInt32(&requestCount); rc != 6 {
+		t.Errorf("got %v exp %v", rc, 6)
+	}
+}
+func TestStream_HttpPostEndpoint_CustomBody(t *testing.T) {
+	headers := map[string]string{"my": "header"}
+	requestCount := int32(0)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range headers {
+			nv := r.Header.Get(k)
+			if nv != v {
+				t.Fatalf("got '%s:%s', exp '%s:%s'", k, nv, k, v)
+			}
+		}
+		data, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(data)
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var exp string
+		switch rc {
+		case 1:
+			exp = "cpu host=serverA type=idle 1971-01-01 00:00:00 +0000 UTC 97.1"
+		case 2:
+			exp = "cpu host=serverA type=idle 1971-01-01 00:00:01 +0000 UTC 92.6"
+		case 3:
+			exp = "cpu host=serverA type=idle 1971-01-01 00:00:02 +0000 UTC 95.6"
+		case 4:
+			exp = "cpu host=serverA type=idle 1971-01-01 00:00:03 +0000 UTC 93.1"
+		case 5:
+			exp = "cpu host=serverA type=idle 1971-01-01 00:00:04 +0000 UTC 92.6"
+		case 6:
+			exp = "cpu host=serverA type=idle 1971-01-01 00:00:05 +0000 UTC 95.8"
+		}
+		if exp != got {
+			t.Errorf("unexpected alert data for request: %d\n%s\n%s\n", rc, exp, got)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+stream
+	|from()
+		.measurement('cpu')
+		.where(lambda: "host" == 'serverA')
+		.groupBy('host')
+	|httpPost()
+	  .endpoint('test')
+	  .header('my', 'header')
+	|httpOut('TestStream_HttpPost')
+`
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu",
+				Tags:    map[string]string{"host": "serverA", "type": "idle"},
+				Columns: []string{"time", "value"},
+				Values: [][]interface{}{[]interface{}{
+					time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+					95.8,
+				}},
+			},
+		},
+	}
+
+	tmInit := func(tm *kapacitor.TaskMaster) {
+		c := httppost.Config{}
+		c.URL = ts.URL
+		c.Endpoint = "test"
+		c.RowTemplate = `{{.Name}} host={{index .Tags "host"}} type={{index .Tags "type"}}{{range .Values}} {{index . "time"}} {{index . "value"}}{{end}}`
+		sl, _ := httppost.NewService(httppost.Configs{c}, diagService.NewHTTPPostHandler())
+		tm.HTTPPostService = sl
+	}
+
+	testStreamerWithOutput(t, "TestStream_HttpPost", script, 13*time.Second, er, false, tmInit)
+
+	if rc := atomic.LoadInt32(&requestCount); rc != 6 {
+		t.Errorf("got %v exp %v", rc, 6)
+	}
+}
+
+func TestStream_HttpPostEndpoint_StatusCodes(t *testing.T) {
+	headers := map[string]string{"my": "header"}
+	requestCount := int32(0)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range headers {
+			nv := r.Header.Get(k)
+			if nv != v {
+				t.Fatalf("got '%s:%s', exp '%s:%s'", k, nv, k, v)
+			}
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		switch rc {
+		case 1:
+			w.WriteHeader(http.StatusOK)
+		case 2:
+			w.WriteHeader(http.StatusCreated)
+		case 3:
+			w.WriteHeader(http.StatusNotFound)
+		case 4:
+			w.WriteHeader(http.StatusForbidden)
+		case 5:
+			w.WriteHeader(http.StatusInternalServerError)
+		case 6:
+			w.WriteHeader(http.StatusBadGateway)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+stream
+	|from()
+		.measurement('cpu')
+		.where(lambda: "host" == 'serverA')
+		.groupBy('host')
+	|httpPost()
+	  .endpoint('test')
+	  .header('my', 'header')
+	  .codeField('code')
+	|window()
+		.every(5s)
+		.period(5s)
+	|httpOut('TestStream_HttpPost')
+`
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu",
+				Tags:    map[string]string{"host": "serverA"},
+				Columns: []string{"time", "code", "type", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						200.0,
+						"idle",
+						97.1,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
+						201.0,
+						"idle",
+						92.6,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+						404.0,
+						"idle",
+						95.6,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
+						403.0,
+						"idle",
+						93.1,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						500.0,
+						"idle",
+						92.6,
+					},
+				},
+			},
+		},
+	}
+
+	tmInit := func(tm *kapacitor.TaskMaster) {
+		c := httppost.Config{}
+		c.URL = ts.URL
+		c.Endpoint = "test"
+		sl, _ := httppost.NewService(httppost.Configs{c}, diagService.NewHTTPPostHandler())
 		tm.HTTPPostService = sl
 	}
 
@@ -4201,6 +5223,8 @@ building
         .as('building', 'floor')
         .on('building')
         .streamName('power_floor_percentage')
+	|log()
+		.prefix('JOINED')
     |eval(lambda: "floor.value" / "building.value")
         .as('value')
     |httpOut('TestStream_JoinOn_AcrossMeasurement')
@@ -5083,22 +6107,24 @@ stream
 		t.Fatal(err)
 	}
 
-	for _, tc := range testCases {
-		t.Log("Method:", tc.Method)
-		var script bytes.Buffer
-		if tc.Args == "" {
-			tc.Args = "'value'"
-		}
-		tmpl.Execute(&script, tc)
-		testStreamerWithOutput(
-			t,
-			"TestStream_InfluxQL_Float",
-			script.String(),
-			13*time.Second,
-			tc.ER,
-			false,
-			nil,
-		)
+	for i, tc := range testCases {
+		t.Run(fmt.Sprintf("%s-%d", tc.Method, i), func(t *testing.T) {
+			t.Log("Method:", tc.Method)
+			var script bytes.Buffer
+			if tc.Args == "" {
+				tc.Args = "'value'"
+			}
+			tmpl.Execute(&script, tc)
+			testStreamerWithOutput(
+				t,
+				"TestStream_InfluxQL_Float",
+				script.String(),
+				13*time.Second,
+				tc.ER,
+				false,
+				nil,
+			)
+		})
 	}
 }
 
@@ -5926,11 +6952,11 @@ stream
 		return
 	}
 	uio := udf_test.NewIO()
-	udfService.CreateFunc = func(name string, l *log.Logger, abortCallback func()) (udf.Interface, error) {
+	udfService.CreateFunc = func(name, taskID, nodeID string, d udf.Diagnostic, abortCallback func()) (udf.Interface, error) {
 		if name != "customFunc" {
 			return nil, fmt.Errorf("unknown function %s", name)
 		}
-		return udf_test.New(uio, l), nil
+		return udf_test.New(taskID, nodeID, uio, d), nil
 	}
 
 	tmInit := func(tm *kapacitor.TaskMaster) {
@@ -5946,6 +6972,12 @@ stream
 			t.Error("expected init message")
 		}
 		init := i.Init
+		if got, exp := init.TaskID, "TestStream_CustomFunctions"; got != exp {
+			t.Errorf("unexpected task ID got %q exp %q", got, exp)
+		}
+		if got, exp := init.NodeID, "customFunc4"; got != exp {
+			t.Errorf("unexpected task ID got %q exp %q", got, exp)
+		}
 
 		if got, exp := len(init.Options), 2; got != exp {
 			t.Fatalf("unexpected number of options in init request, got %d exp %d", got, exp)
@@ -6171,11 +7203,12 @@ func TestStream_Alert_NoRecoveries(t *testing.T) {
 			}
 		case 2:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Time:     time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
-				Duration: 0,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Time:          time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+				Duration:      0,
+				Level:         alert.Info,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6192,11 +7225,12 @@ func TestStream_Alert_NoRecoveries(t *testing.T) {
 			}
 		case 3:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Time:     time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
-				Duration: time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Time:          time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
+				Duration:      time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6213,11 +7247,12 @@ func TestStream_Alert_NoRecoveries(t *testing.T) {
 			}
 		case 4:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Time:     time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Time:          time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6234,11 +7269,12 @@ func TestStream_Alert_NoRecoveries(t *testing.T) {
 			}
 		case 5:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is CRITICAL",
-				Time:     time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.Critical,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is CRITICAL",
+				Time:          time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6255,11 +7291,12 @@ func TestStream_Alert_NoRecoveries(t *testing.T) {
 			}
 		case 6:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Time:     time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
-				Duration: 0,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Time:          time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+				Duration:      0,
+				Level:         alert.Info,
+				PreviousLevel: alert.Critical,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6358,12 +7395,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 2:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
-				Duration: time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
+				Duration:      time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6380,12 +7418,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 3:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6402,12 +7441,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 4:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6424,12 +7464,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 5:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-				Duration: 0 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+				Duration:      0 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.OK,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6446,12 +7487,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 6:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
-				Duration: 1 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+				Duration:      1 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6468,12 +7510,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 7:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6490,12 +7533,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 8:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6512,12 +7556,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 9:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
-				Duration: 0 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+				Duration:      0 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.OK,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6534,12 +7579,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 10:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC),
-				Duration: 1 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC),
+				Duration:      1 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6556,12 +7602,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 11:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is CRITICAL",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Critical,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is CRITICAL",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6578,12 +7625,13 @@ func TestStream_Alert_WithReset_0(t *testing.T) {
 			}
 		case 12:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Critical,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6696,12 +7744,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 2:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
-				Duration: time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
+				Duration:      time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6718,12 +7767,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 3:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6740,12 +7790,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 4:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6762,12 +7813,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 5:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-				Duration: 0 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+				Duration:      0 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.OK,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6784,12 +7836,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 6:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
-				Duration: 1 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+				Duration:      1 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6806,12 +7859,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 7:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6828,12 +7882,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 8:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6850,12 +7905,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 9:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
-				Duration: 0 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+				Duration:      0 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.OK,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6872,12 +7928,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 10:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC),
-				Duration: 1 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC),
+				Duration:      1 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6894,12 +7951,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 11:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is CRITICAL",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Critical,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is CRITICAL",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6916,12 +7974,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 12:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Critical,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6938,12 +7997,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 13:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 12, 0, time.UTC),
-				Duration: 4 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 12, 0, time.UTC),
+				Duration:      4 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6960,12 +8020,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 14:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is INFO",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 13, 0, time.UTC),
-				Duration: 5 * time.Second,
-				Level:    alert.Info,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is INFO",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 13, 0, time.UTC),
+				Duration:      5 * time.Second,
+				Level:         alert.Info,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -6982,12 +8043,13 @@ func TestStream_Alert_WithReset_1(t *testing.T) {
 			}
 		case 15:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 14, 0, time.UTC),
-				Duration: 6 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 14, 0, time.UTC),
+				Duration:      6 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -7101,12 +8163,13 @@ func TestStream_AlertDuration(t *testing.T) {
 			}
 		case 2:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
-				Duration: 2 * time.Second,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+				Duration:      2 * time.Second,
+				Level:         alert.Warning,
+				PreviousLevel: alert.Critical,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -7123,12 +8186,13 @@ func TestStream_AlertDuration(t *testing.T) {
 			}
 		case 3:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-				Duration: 4 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+				Duration:      4 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -7145,12 +8209,13 @@ func TestStream_AlertDuration(t *testing.T) {
 			}
 		case 4:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is WARNING",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
-				Duration: 0,
-				Level:    alert.Warning,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is WARNING",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+				Duration:      0,
+				Level:         alert.Warning,
+				PreviousLevel: alert.OK,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -7167,12 +8232,13 @@ func TestStream_AlertDuration(t *testing.T) {
 			}
 		case 5:
 			expAd = alert.Data{
-				ID:       "kapacitor/cpu/serverA",
-				Message:  "kapacitor/cpu/serverA is OK",
-				Details:  "details",
-				Time:     time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
-				Duration: 3 * time.Second,
-				Level:    alert.OK,
+				ID:            "kapacitor/cpu/serverA",
+				Message:       "kapacitor/cpu/serverA is OK",
+				Details:       "details",
+				Time:          time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+				Duration:      3 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Warning,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -7265,7 +8331,7 @@ stream
 		c.Enabled = true
 		c.Addr = ts.Addr
 		c.Source = "Kapacitor"
-		sl := sensu.NewService(c, logService.NewLogger("[test_sensu] ", log.LstdFlags))
+		sl := sensu.NewService(c, diagService.NewSensuHandler())
 		tm.SensuService = sl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -7321,7 +8387,8 @@ stream
 		c.Enabled = true
 		c.URL = ts.URL + "/test/slack/url"
 		c.Channel = "#channel"
-		sl, err := slack.NewService(c, logService.NewLogger("[test_slack] ", log.LstdFlags))
+		d := diagService.NewSlackHandler().WithContext(keyvalue.KV("test", "slack"))
+		sl, err := slack.NewService(c, d)
 		if err != nil {
 			t.Error(err)
 		}
@@ -7409,7 +8476,7 @@ stream
 		c.ChatId = "123456789"
 		c.DisableWebPagePreview = true
 		c.DisableNotification = false
-		tl := telegram.NewService(c, logService.NewLogger("[test_telegram] ", log.LstdFlags))
+		tl := telegram.NewService(c, diagService.NewTelegramHandler())
 		tm.TelegramService = tl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -7541,7 +8608,7 @@ stream
 		c.URL = ts.URL
 		c.Room = "1231234"
 		c.Token = "testtoken1231234"
-		sl := hipchat.NewService(c, logService.NewLogger("[test_hipchat] ", log.LstdFlags))
+		sl := hipchat.NewService(c, diagService.NewHipChatHandler())
 		tm.HipChatService = sl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -7601,6 +8668,7 @@ stream
 		.alerta()
 			.token('testtoken1234567')
 			.environment('production')
+			.timeout(1h)
 		.alerta()
 			.token('anothertesttoken')
 			.resource('resource: {{ index .Tags "host" }}')
@@ -7609,14 +8677,14 @@ stream
 			.origin('override')
 			.group('{{ .ID }}')
 			.value('{{ index .Fields "count" }}')
-			.services('serviceA', 'serviceB')
+			.services('serviceA', 'serviceB', '{{ .Name }}')
 `
 	tmInit := func(tm *kapacitor.TaskMaster) {
 		c := alerta.NewConfig()
 		c.Enabled = true
 		c.URL = ts.URL
 		c.Origin = "Kapacitor"
-		sl := alerta.NewService(c, logService.NewLogger("[test_alerta] ", log.LstdFlags))
+		sl := alerta.NewService(c, diagService.NewAlertaHandler())
 		tm.AlertaService = sl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -7633,6 +8701,7 @@ stream
 				Text:        "kapacitor/cpu/serverA is CRITICAL @1971-01-01 00:00:10 +0000 UTC",
 				Origin:      "Kapacitor",
 				Service:     []string{"cpu"},
+				Timeout:     3600,
 			},
 		},
 		alertatest.Request{
@@ -7645,8 +8714,9 @@ stream
 				Environment: "serverA",
 				Text:        "kapacitor/cpu/serverA is CRITICAL @1971-01-01 00:00:10 +0000 UTC",
 				Origin:      "override",
-				Service:     []string{"serviceA", "serviceB"},
+				Service:     []string{"serviceA", "serviceB", "cpu"},
 				Value:       "10",
+				Timeout:     86400,
 			},
 		},
 	}
@@ -7698,7 +8768,7 @@ stream
 		c.URL = ts.URL
 		c.UserKey = "user"
 		c.Token = "KzGDORePKggMaC0QOYAMyEEuzJnyUi"
-		sl := pushover.NewService(c, logService.NewLogger("[test_pushover] ", log.LstdFlags))
+		sl := pushover.NewService(c, diagService.NewPushoverHandler())
 		tm.PushoverService = sl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -7770,7 +8840,7 @@ stream
 		c.Enabled = true
 		c.URL = ts.URL
 		c.APIKey = "api_key"
-		og := opsgenie.NewService(c, logService.NewLogger("[test_og] ", log.LstdFlags))
+		og := opsgenie.NewService(c, diagService.NewOpsGenieHandler())
 		tm.OpsGenieService = og
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -7828,7 +8898,9 @@ func TestStream_AlertPagerDuty(t *testing.T) {
 	ts := pagerdutytest.NewServer()
 	defer ts.Close()
 
-	defaultDetails := "{&#34;Name&#34;:&#34;cpu&#34;,&#34;TaskName&#34;:&#34;TestStream_Alert&#34;,&#34;Group&#34;:&#34;host=serverA&#34;,&#34;Tags&#34;:{&#34;host&#34;:&#34;serverA&#34;},&#34;ServerInfo&#34;:{&#34;Hostname&#34;:&#34;&#34;,&#34;ClusterID&#34;:&#34;&#34;,&#34;ServerID&#34;:&#34;&#34;},&#34;ID&#34;:&#34;kapacitor/cpu/serverA&#34;,&#34;Fields&#34;:{&#34;count&#34;:10},&#34;Level&#34;:&#34;CRITICAL&#34;,&#34;Time&#34;:&#34;1971-01-01T00:00:10Z&#34;,&#34;Message&#34;:&#34;CRITICAL alert for kapacitor/cpu/serverA&#34;}\n"
+	defaultDetailsTmpl := `{"Name":"cpu","TaskName":"TestStream_Alert","Group":"host=serverA","Tags":{"host":"serverA"},"ServerInfo":{"Hostname":"%v","ClusterID":"%v","ServerID":"%v"},"ID":"kapacitor/cpu/serverA","Fields":{"count":10},"Level":"CRITICAL","Time":"1971-01-01T00:00:10Z","Duration":0,"Message":"CRITICAL alert for kapacitor/cpu/serverA"}
+`
+	var defaultDetails string
 
 	var script = `
 stream
@@ -7853,11 +8925,17 @@ stream
 
 	var kapacitorURL string
 	tmInit := func(tm *kapacitor.TaskMaster) {
+		si := tm.ServerInfo
+		defaultDetails = fmt.Sprintf(defaultDetailsTmpl,
+			si.Hostname(),
+			si.ClusterID(),
+			si.ServerID(),
+		)
 		c := pagerduty.NewConfig()
 		c.Enabled = true
 		c.URL = ts.URL
 		c.ServiceKey = "service_key"
-		pd := pagerduty.NewService(c, logService.NewLogger("[test_pd] ", log.LstdFlags))
+		pd := pagerduty.NewService(c, diagService.NewPagerDutyHandler())
 		pd.HTTPDService = tm.HTTPDService
 		tm.PagerDutyService = pd
 
@@ -7874,7 +8952,7 @@ stream
 				Description: "CRITICAL alert for kapacitor/cpu/serverA",
 				Client:      "kapacitor",
 				ClientURL:   kapacitorURL,
-				Details:     defaultDetails,
+				Details:     html.EscapeString(defaultDetails),
 			},
 		},
 		pagerdutytest.Request{
@@ -7885,7 +8963,7 @@ stream
 				Description: "CRITICAL alert for kapacitor/cpu/serverA",
 				Client:      "kapacitor",
 				ClientURL:   kapacitorURL,
-				Details:     defaultDetails,
+				Details:     html.EscapeString(defaultDetails),
 			},
 		},
 	}
@@ -7902,7 +8980,7 @@ stream
 }
 
 func TestStream_AlertHTTPPost(t *testing.T) {
-	ts := httpposttest.NewAlertServer(nil)
+	ts := httpposttest.NewAlertServer(nil, false)
 	defer ts.Close()
 
 	var script = `
@@ -7964,7 +9042,7 @@ stream
 
 func TestStream_AlertHTTPPostEndpoint(t *testing.T) {
 	headers := map[string]string{"Authorization": "works"}
-	ts := httpposttest.NewAlertServer(headers)
+	ts := httpposttest.NewAlertServer(headers, false)
 	defer ts.Close()
 
 	var script = `
@@ -7991,7 +9069,7 @@ stream
 		c.URL = ts.URL
 		c.Endpoint = "test"
 		c.Headers = headers
-		sl := httppost.NewService(httppost.Configs{c}, logService.NewLogger("[test_pushover] ", log.LstdFlags))
+		sl, _ := httppost.NewService(httppost.Configs{c}, diagService.NewHTTPPostHandler())
 		tm.HTTPPostService = sl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -8063,7 +9141,8 @@ stream
 		c.URL = ts.URL
 		c.APIKey = "api_key"
 		c.RoutingKey = "routing_key"
-		vo := victorops.NewService(c, logService.NewLogger("[test_vo] ", log.LstdFlags))
+		d := diagService.NewVictorOpsHandler().WithContext(keyvalue.KV("test", "vo"))
+		vo := victorops.NewService(c, d)
 		tm.VictorOpsService = vo
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -8089,6 +9168,79 @@ stream
 				Timestamp:      31536010,
 				MonitoringTool: "kapacitor",
 				Data:           `{"series":[{"name":"cpu","tags":{"host":"serverA"},"columns":["time","count"],"values":[["1971-01-01T00:00:10Z",10]]}]}`,
+			},
+		},
+	}
+
+	ts.Close()
+	var got []interface{}
+	for _, g := range ts.Requests() {
+		got = append(got, g)
+	}
+
+	if err := compareListIgnoreOrder(got, exp, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestStream_AlertVictorOps_JSON_Data(t *testing.T) {
+	ts := victoropstest.NewServer()
+	defer ts.Close()
+
+	var script = `
+stream
+	|from()
+		.measurement('cpu')
+		.where(lambda: "host" == 'serverA')
+		.groupBy('host')
+	|window()
+		.period(10s)
+		.every(10s)
+	|count('value')
+	|alert()
+		.id('kapacitor/{{ .Name }}/{{ index .Tags "host" }}')
+		.info(lambda: "count" > 6.0)
+		.warn(lambda: "count" > 7.0)
+		.crit(lambda: "count" > 8.0)
+		.victorOps()
+`
+
+	tmInit := func(tm *kapacitor.TaskMaster) {
+		c := victorops.NewConfig()
+		c.Enabled = true
+		c.URL = ts.URL
+		c.APIKey = "api_key"
+		c.RoutingKey = "routing_key"
+		c.JSONData = true
+		d := diagService.NewVictorOpsHandler().WithContext(keyvalue.KV("test", "vo"))
+		vo := victorops.NewService(c, d)
+		tm.VictorOpsService = vo
+	}
+	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
+
+	exp := []interface{}{
+		victoropstest.Request{
+			URL: "/api_key/routing_key",
+			PostData: victoropstest.PostData{
+				MessageType:    "CRITICAL",
+				EntityID:       "kapacitor/cpu/serverA",
+				StateMessage:   "kapacitor/cpu/serverA is CRITICAL",
+				Timestamp:      31536010,
+				MonitoringTool: "kapacitor",
+				Data: map[string]interface{}{
+					"series": []interface{}{
+						map[string]interface{}{
+							"name": "cpu",
+							"tags": map[string]interface{}{
+								"host": "serverA",
+							},
+							"columns": []interface{}{"time", "count"},
+							"values": []interface{}{
+								[]interface{}{"1971-01-01T00:00:10Z", 10.0},
+							},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -8131,7 +9283,7 @@ stream
 		c.Enabled = true
 		c.URL = ts.URL
 		c.AuthorName = "Kapacitor"
-		sl := talk.NewService(c, logService.NewLogger("[test_talk] ", log.LstdFlags))
+		sl := talk.NewService(c, diagService.NewTalkHandler())
 		tm.TalkService = sl
 	}
 	testStreamerNoOutput(t, "TestStream_Alert", script, 13*time.Second, tmInit)
@@ -8404,7 +9556,7 @@ Value: 10
 		Port:    smtpServer.Port,
 		From:    "test@example.com",
 	}
-	smtpService := smtp.NewService(sc, logService.NewLogger("[test-smtp] ", log.LstdFlags))
+	smtpService := smtp.NewService(sc, diagService.NewSMTPHandler())
 	if err := smtpService.Open(); err != nil {
 		t.Fatal(err)
 	}
@@ -8471,6 +9623,11 @@ stream
 				ErrorStatus: snmpgo.NoError,
 				VarBinds: snmptraptest.VarBinds{
 					{
+						Oid:   "1.3.6.1.2.1.1.3.0",
+						Value: "1000",
+						Type:  "TimeTicks",
+					},
+					{
 						Oid:   "1.3.6.1.6.3.1.1.4.1.0",
 						Value: "1.1.1",
 						Type:  "Oid",
@@ -8498,6 +9655,11 @@ stream
 				Type:        snmpgo.SNMPTrapV2,
 				ErrorStatus: snmpgo.NoError,
 				VarBinds: snmptraptest.VarBinds{
+					{
+						Oid:   "1.3.6.1.2.1.1.3.0",
+						Value: "1000",
+						Type:  "TimeTicks",
+					},
 					{
 						Oid:   "1.3.6.1.6.3.1.1.4.1.0",
 						Value: "1.1.2",
@@ -8534,7 +9696,7 @@ stream
 	c.Addr = snmpServer.Addr
 	c.Community = snmpServer.Community
 	c.Retries = 2
-	st := snmptrap.NewService(c, logService.NewLogger("[test_snmptrap] ", log.LstdFlags))
+	st := snmptrap.NewService(c, diagService.NewSNMPTrapHandler())
 	if err := st.Open(); err != nil {
 		t.Fatal(err)
 	}
@@ -8596,12 +9758,13 @@ func TestStream_AlertSigma(t *testing.T) {
 			}
 		} else {
 			expAd = alert.Data{
-				ID:       "cpu:nil",
-				Message:  "cpu:nil is OK",
-				Details:  "cpu:nil is OK",
-				Time:     time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
-				Duration: time.Second,
-				Level:    alert.OK,
+				ID:            "cpu:nil",
+				Message:       "cpu:nil is OK",
+				Details:       "cpu:nil is OK",
+				Time:          time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+				Duration:      time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Info,
 				Data: models.Result{
 					Series: models.Rows{
 						{
@@ -8741,21 +9904,32 @@ func TestStream_AlertStateChangesOnlyExpired(t *testing.T) {
 		var expAd alert.Data
 		atomic.AddInt32(&requestCount, 1)
 		rc := atomic.LoadInt32(&requestCount)
-		if rc < 6 {
+		if rc == 1 {
 			expAd = alert.Data{
-				ID:       "cpu:nil",
-				Message:  "cpu:nil is CRITICAL",
-				Time:     time.Date(1971, 1, 1, 0, 0, int(rc)*2-1, 0, time.UTC),
-				Duration: time.Duration(rc-1) * 2 * time.Second,
-				Level:    alert.Critical,
+				ID:            "cpu:nil",
+				Message:       "cpu:nil is CRITICAL",
+				Time:          time.Date(1971, 1, 1, 0, 0, int(rc)*2-1, 0, time.UTC),
+				Duration:      time.Duration(rc-1) * 2 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.OK,
+			}
+		} else if rc < 6 {
+			expAd = alert.Data{
+				ID:            "cpu:nil",
+				Message:       "cpu:nil is CRITICAL",
+				Time:          time.Date(1971, 1, 1, 0, 0, int(rc)*2-1, 0, time.UTC),
+				Duration:      time.Duration(rc-1) * 2 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.Critical,
 			}
 		} else {
 			expAd = alert.Data{
-				ID:       "cpu:nil",
-				Message:  "cpu:nil is OK",
-				Time:     time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
-				Duration: 9 * time.Second,
-				Level:    alert.OK,
+				ID:            "cpu:nil",
+				Message:       "cpu:nil is OK",
+				Time:          time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+				Duration:      9 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Critical,
 			}
 		}
 		if eq, msg := compareAlertData(expAd, ad); !eq {
@@ -8811,184 +9985,359 @@ stream
 	}
 }
 
-func TestStream_K8sAutoscale(t *testing.T) {
+func TestStream_LambdaNow(t *testing.T) {
 	var script = `
 stream
 	|from()
-		.measurement('scale')
-		.groupBy('deployment')
-	|k8sAutoscale()
-		.resourceNameTag('deployment')
-		.replicas(lambda: int("replicas"))
-	|httpOut('TestStream_K8sAutoscale')
+		.measurement('account')
+	|where(lambda: "expiration" < unixNano(now()))
+	|groupBy('owner')
+	|httpOut('TestStream_LambdaNow')
 `
 
-	er := models.Result{
+	expectedOutput := models.Result{
 		Series: models.Rows{
 			{
-				Name: "scale",
-				Tags: map[string]string{
-					"deployment": "serviceA",
-					"namespace":  "default",
-					"kind":       "deployments",
-					"resource":   "serviceA",
+				Name:    "account",
+				Tags:    map[string]string{"owner": "ownerA"},
+				Columns: []string{"time", "expiration"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						float64(3.15533e+17), // 1980-01-01 00:00:00 (Unix ns timestamp)
+
+						// we expect "expiration" to be float64 and not int64 (even with input data consisting of ints)
+						// because httpOut uses JSON as serialization format for the results,
+						// resulting in the integers becoming floats
+					},
 				},
-				Columns: []string{"time", "new", "old"},
-				Values: [][]interface{}{[]interface{}{
-					time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-					2.0,
-					1000.0,
-				}},
 			},
+
+			// the point with expiration = 4102440000000000000 should not be in the results
+			// as it represents a date past now (2100-01-01 00:00:00)
+
 			{
-				Name: "scale",
-				Tags: map[string]string{
-					"deployment": "serviceB",
-					"namespace":  "default",
-					"kind":       "deployments",
-					"resource":   "serviceB",
+				Name:    "account",
+				Tags:    map[string]string{"owner": "ownerC"},
+				Columns: []string{"time", "expiration"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						float64(6.56419e+17), // 1990-10-20 10:42:42
+					},
 				},
-				Columns: []string{"time", "new", "old"},
-				Values: [][]interface{}{[]interface{}{
-					time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-					20.0,
-					1000.0,
-				}},
 			},
 		},
 	}
-	scaleUpdates := make(chan k8s.Scale, 100)
-	k8sAutoscale := k8sAutoscale{}
-	k8sAutoscale.ScalesGetFunc = func(kind, name string) (*k8s.Scale, error) {
-		var replicas int32
-		switch name {
-		case "serviceA":
-			replicas = 1
-		case "serviceB":
-			replicas = 10
-		}
-		return &k8s.Scale{
-			ObjectMeta: k8s.ObjectMeta{
-				Name: name,
-			},
-			Spec: k8s.ScaleSpec{
-				Replicas: replicas,
-			},
-		}, nil
-	}
-	k8sAutoscale.ScalesUpdateFunc = func(kind string, scale *k8s.Scale) error {
-		scaleUpdates <- *scale
-		return nil
-	}
-	tmInit := func(tm *kapacitor.TaskMaster) {
-		tm.K8sService = k8sAutoscale
-	}
 
-	testStreamerWithOutput(t, "TestStream_K8sAutoscale", script, 13*time.Second, er, false, tmInit)
-
-	close(scaleUpdates)
-	updatesByService := make(map[string][]int32)
-	for scale := range scaleUpdates {
-		updatesByService[scale.Name] = append(updatesByService[scale.Name], scale.Spec.Replicas)
-	}
-	expUpdates := map[string][]int32{
-		"serviceA": []int32{2, 1, 1000, 2},
-		"serviceB": []int32{20, 1, 1000, 20},
-	}
-
-	if !reflect.DeepEqual(updatesByService, expUpdates) {
-		t.Errorf("unexpected updates\ngot\n%v\nexp\n%v\n", updatesByService, expUpdates)
-	}
+	testStreamerWithOutput(t, "TestStream_LambdaNow", script, time.Second, expectedOutput, false, nil)
 }
-func TestStream_K8sAutoscale_MinMax(t *testing.T) {
+
+func TestStream_EvalNow(t *testing.T) {
 	var script = `
+stream
+	|from()
+		.measurement('account')
+	|eval(lambda: year(now()))
+		.as('currentYear')
+	|httpOut('TestStream_EvalNow')
+`
+
+	expectedOutput := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "account",
+				Tags:    map[string]string{"owner": "ownerA"},
+				Columns: []string{"time", "currentYear"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						float64(time.Now().Year()),
+					},
+				},
+			},
+		},
+	}
+
+	testStreamerWithOutput(t, "TestStream_EvalNow", script, time.Second, expectedOutput, false, nil)
+}
+
+func TestStream_Autoscale(t *testing.T) {
+	testCases := map[string]struct {
+		script           string
+		result           models.Result
+		minMaxResult     models.Result
+		setup            func(*kapacitor.TaskMaster) context.Context
+		updatesByService func(context.Context) map[string][]int
+	}{
+		"k8sAutoscale": {
+			script: `|k8sAutoscale().resourceNameTag('deployment')`,
+			result: models.Result{
+				Series: models.Rows{
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceA",
+							"namespace":  "default",
+							"kind":       "deployments",
+							"resource":   "serviceA",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							2.0,
+							1000.0,
+						}},
+					},
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceB",
+							"namespace":  "default",
+							"kind":       "deployments",
+							"resource":   "serviceB",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							20.0,
+							1000.0,
+						}},
+					},
+				},
+			},
+			minMaxResult: models.Result{
+				Series: models.Rows{
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceA",
+							"namespace":  "default",
+							"kind":       "deployments",
+							"resource":   "serviceA",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							3.0,
+							500.0,
+						}},
+					},
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceB",
+							"namespace":  "default",
+							"kind":       "deployments",
+							"resource":   "serviceB",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							20.0,
+							500.0,
+						}},
+					},
+				},
+			},
+			setup: func(tm *kapacitor.TaskMaster) context.Context {
+				scaleUpdates := make(chan k8s.Scale, 100)
+				ctx := context.WithValue(nil, "updates", scaleUpdates)
+				k8sAutoscale := k8stest.Client{}
+				k8sAutoscale.ScalesGetFunc = func(kind, name string) (*k8s.Scale, error) {
+					var replicas int32
+					switch name {
+					case "serviceA":
+						replicas = 1
+					case "serviceB":
+						replicas = 10
+					}
+					return &k8s.Scale{
+						ObjectMeta: k8s.ObjectMeta{
+							Name: name,
+						},
+						Spec: k8s.ScaleSpec{
+							Replicas: replicas,
+						},
+					}, nil
+				}
+				k8sAutoscale.ScalesUpdateFunc = func(kind string, scale *k8s.Scale) error {
+					scaleUpdates <- *scale
+					return nil
+				}
+				tm.K8sService = k8sAutoscale
+				return ctx
+			},
+			updatesByService: func(ctx context.Context) map[string][]int {
+				scaleUpdates := ctx.Value("updates").(chan k8s.Scale)
+				close(scaleUpdates)
+				updatesByService := make(map[string][]int)
+				for scale := range scaleUpdates {
+					updatesByService[scale.Name] = append(updatesByService[scale.Name], int(scale.Spec.Replicas))
+				}
+				return updatesByService
+			},
+		},
+		"swarmAutoscale": {
+			script: `|swarmAutoscale().serviceNameTag('deployment')`,
+			result: models.Result{
+				Series: models.Rows{
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceA",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							2.0,
+							1000.0,
+						}},
+					},
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceB",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							20.0,
+							1000.0,
+						}},
+					},
+				},
+			},
+			minMaxResult: models.Result{
+				Series: models.Rows{
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceA",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							3.0,
+							500.0,
+						}},
+					},
+					{
+						Name: "scale",
+						Tags: map[string]string{
+							"deployment": "serviceB",
+						},
+						Columns: []string{"time", "new", "old"},
+						Values: [][]interface{}{[]interface{}{
+							time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+							20.0,
+							500.0,
+						}},
+					},
+				},
+			},
+			setup: func(tm *kapacitor.TaskMaster) context.Context {
+				serviceUpdates := make(chan swarm.Service, 100)
+				ctx := context.WithValue(nil, "updates", serviceUpdates)
+				swarmAutoscale := swarmtest.Client{}
+				swarmAutoscale.ServiceFunc = func(name string) (*swarm.Service, error) {
+					var replicas uint64
+					switch name {
+					case "serviceA":
+						replicas = 1
+					case "serviceB":
+						replicas = 10
+					}
+					return &swarm.Service{
+						ID: name,
+						Spec: swarm.ServiceSpec{
+							Mode: swarm.ServiceMode{
+								Replicated: &swarm.ReplicatedService{
+									Replicas: &replicas,
+								},
+							},
+						},
+					}, nil
+				}
+				swarmAutoscale.UpdateServiceFunc = func(service *swarm.Service) error {
+					serviceUpdates <- *service
+					return nil
+				}
+				tm.SwarmService = swarmAutoscale
+				return ctx
+			},
+			updatesByService: func(ctx context.Context) map[string][]int {
+				updates := ctx.Value("updates").(chan swarm.Service)
+				close(updates)
+				updatesByService := make(map[string][]int)
+				for service := range updates {
+					updatesByService[service.ID] = append(updatesByService[service.ID], int(*service.Spec.Mode.Replicated.Replicas))
+				}
+				return updatesByService
+			},
+		},
+	}
+	expUpdatesByService := map[string][]int{
+		"serviceA": []int{2, 1, 1000, 2},
+		"serviceB": []int{20, 1, 1000, 20},
+	}
+	expMinMaxUpdatesByService := map[string][]int{
+		"serviceA": []int{3, 500, 3},
+		"serviceB": []int{20, 3, 500, 20},
+	}
+
+	var scriptTmpl = `
 stream
 	|from()
 		.measurement('scale')
 		.groupBy('deployment')
-	|k8sAutoscale()
+	%s
+		.replicas(lambda: int("replicas"))
+	|httpOut('TestStream_Autoscale')
+`
+
+	var scriptMinMaxTmpl = `
+stream
+	|from()
+		.measurement('scale')
+		.groupBy('deployment')
+	%s
+		.replicas(lambda: int("replicas"))
 		.min(3)
 		.max(500)
-		.resourceNameTag('deployment')
-		.replicas(lambda: int("replicas"))
-	|httpOut('TestStream_K8sAutoscale')
+	|httpOut('TestStream_Autoscale')
 `
 
-	er := models.Result{
-		Series: models.Rows{
-			{
-				Name: "scale",
-				Tags: map[string]string{
-					"deployment": "serviceA",
-					"namespace":  "default",
-					"kind":       "deployments",
-					"resource":   "serviceA",
-				},
-				Columns: []string{"time", "new", "old"},
-				Values: [][]interface{}{[]interface{}{
-					time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-					3.0,
-					500.0,
-				}},
-			},
-			{
-				Name: "scale",
-				Tags: map[string]string{
-					"deployment": "serviceB",
-					"namespace":  "default",
-					"kind":       "deployments",
-					"resource":   "serviceB",
-				},
-				Columns: []string{"time", "new", "old"},
-				Values: [][]interface{}{[]interface{}{
-					time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-					20.0,
-					500.0,
-				}},
-			},
-		},
-	}
-	scaleUpdates := make(chan k8s.Scale, 100)
-	k8sAutoscale := k8sAutoscale{}
-	k8sAutoscale.ScalesGetFunc = func(kind, name string) (*k8s.Scale, error) {
-		var replicas int32
-		switch name {
-		case "serviceA":
-			replicas = 1
-		case "serviceB":
-			replicas = 10
-		}
-		return &k8s.Scale{
-			ObjectMeta: k8s.ObjectMeta{
-				Name: name,
-			},
-			Spec: k8s.ScaleSpec{
-				Replicas: replicas,
-			},
-		}, nil
-	}
-	k8sAutoscale.ScalesUpdateFunc = func(kind string, scale *k8s.Scale) error {
-		scaleUpdates <- *scale
-		return nil
-	}
-	tmInit := func(tm *kapacitor.TaskMaster) {
-		tm.K8sService = k8sAutoscale
-	}
+	for name, tc := range testCases {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			var ctx context.Context
+			tmInit := func(tm *kapacitor.TaskMaster) {
+				ctx = tc.setup(tm)
+			}
 
-	testStreamerWithOutput(t, "TestStream_K8sAutoscale", script, 13*time.Second, er, false, tmInit)
+			testStreamerWithOutput(t, "TestStream_Autoscale", fmt.Sprintf(scriptTmpl, tc.script), 13*time.Second, tc.result, false, tmInit)
 
-	close(scaleUpdates)
-	updatesByService := make(map[string][]int32)
-	for scale := range scaleUpdates {
-		updatesByService[scale.Name] = append(updatesByService[scale.Name], scale.Spec.Replicas)
-	}
-	expUpdates := map[string][]int32{
-		"serviceA": []int32{3, 500, 3},
-		"serviceB": []int32{20, 3, 500, 20},
-	}
+			updatesByService := tc.updatesByService(ctx)
 
-	if !reflect.DeepEqual(updatesByService, expUpdates) {
-		t.Errorf("unexpected updates\ngot\n%v\nexp\n%v\n", updatesByService, expUpdates)
+			if !reflect.DeepEqual(updatesByService, expUpdatesByService) {
+				t.Errorf("unexpected updates\ngot\n%v\nexp\n%v\n", updatesByService, expUpdatesByService)
+			}
+		})
+		t.Run("min-max-"+name, func(t *testing.T) {
+			var ctx context.Context
+			tmInit := func(tm *kapacitor.TaskMaster) {
+				ctx = tc.setup(tm)
+			}
+
+			testStreamerWithOutput(t, "TestStream_Autoscale", fmt.Sprintf(scriptMinMaxTmpl, tc.script), 13*time.Second, tc.minMaxResult, false, tmInit)
+
+			updatesByService := tc.updatesByService(ctx)
+
+			if !reflect.DeepEqual(updatesByService, expMinMaxUpdatesByService) {
+				t.Errorf("unexpected updates\ngot\n%v\nexp\n%v\n", updatesByService, expMinMaxUpdatesByService)
+			}
+		})
 	}
 }
 
@@ -9085,7 +10434,7 @@ stream
 		t.Fatal(err)
 	}
 	name := "TestStream_KapacitorLoopback"
-	data, err := os.Open(path.Join(dir, "data", name+".srpl"))
+	data, err := os.Open(path.Join(dir, "testdata", name+".srpl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9217,7 +10566,7 @@ stream
 		t.Fatal(err)
 	}
 	name := "TestStream_KapacitorLoopback"
-	data, err := os.Open(path.Join(dir, "data", name+".srpl"))
+	data, err := os.Open(path.Join(dir, "testdata", name+".srpl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9282,6 +10631,229 @@ stream
 	if eq, msg := compareResults(er, result); !eq {
 		t.Error(msg)
 	}
+}
+
+func TestStream_Sideload(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script = fmt.Sprintf(`
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('m')
+		.groupBy('t0', 't1', 't2')
+	|sideload()
+		.source('file://%s/testdata/sideload')
+		.order('t0/{{.t0}}.yml', 't1/{{.t1}}.yml', 't2/{{.t2}}.yml')
+		.field('f1', 0)
+		.field('f2', 0.0)
+		.tag('t3', 'one')
+	|log()
+	|httpOut('TestStream_Sideload')
+`, wd)
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x", "t3": "one"},
+				Columns: []string{"time", "f1", "f2", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						0.0,
+						0.0,
+						1.0,
+					},
+				},
+			},
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						2.0,
+						3.5,
+						1.0,
+					},
+				},
+			},
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						12.0,
+						13.5,
+						1.0,
+					},
+				},
+			},
+		},
+	}
+	tmInit := func(tm *kapacitor.TaskMaster) {
+		tm.SideloadService = sideload.NewService(diagService.NewSideloadHandler())
+	}
+
+	testStreamerWithOutput(t, "TestStream_Sideload", script, 1*time.Second, er, true, tmInit)
+}
+
+func TestStream_Sideload_JSON(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script = fmt.Sprintf(`
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('m')
+		.groupBy('t0', 't1', 't2')
+	|sideload()
+		.source('file://%s/testdata/sideload')
+		.order('t0/{{.t0}}.json', 't1/{{.t1}}.json', 't2/{{.t2}}.yml')
+		.field('f1', 0)
+		.field('f2', 0.0)
+		.tag('t3', 'one')
+	|log()
+	|httpOut('TestStream_Sideload')
+`, wd)
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x", "t3": "one"},
+				Columns: []string{"time", "f1", "f2", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						0.0,
+						0.0,
+						1.0,
+					},
+				},
+			},
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						2.0,
+						3.5,
+						1.0,
+					},
+				},
+			},
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						12.0,
+						13.5,
+						1.0,
+					},
+				},
+			},
+		},
+	}
+	tmInit := func(tm *kapacitor.TaskMaster) {
+		tm.SideloadService = sideload.NewService(diagService.NewSideloadHandler())
+	}
+
+	testStreamerWithOutput(t, "TestStream_Sideload", script, 1*time.Second, er, true, tmInit)
+}
+
+func TestStream_Sideload_Multiple(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script = fmt.Sprintf(`
+stream
+	|from()
+		.database('dbname')
+		.retentionPolicy('rpname')
+		.measurement('m')
+		.groupBy('t0', 't1', 't2')
+	|sideload()
+		.source('file://%[1]s/testdata/sideload')
+		.order('t0/{{.t0}}.yml', 't1/{{.t1}}.yml', 't2/{{.t2}}.yml')
+		.field('f1', 0)
+		.field('f2', 0.0)
+		.tag('t3', 'one')
+	|sideload()
+		.source('file://%[1]s/testdata/sideload')
+		.order('t0/{{.t0}}.yml', 't1/{{.t1}}.yml', 't2/{{.t2}}.yml')
+		.field('other', -1.0)
+	|log()
+	|httpOut('TestStream_Sideload')
+`, wd)
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "a", "t1": "m", "t2": "x", "t3": "one"},
+				Columns: []string{"time", "f1", "f2", "other", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						0.0,
+						0.0,
+						-1.0,
+						1.0,
+					},
+				},
+			},
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "b", "t1": "n", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "other", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						2.0,
+						3.5,
+						56.0,
+						1.0,
+					},
+				},
+			},
+			{
+				Name:    "m",
+				Tags:    map[string]string{"t0": "c", "t1": "o", "t2": "y", "t3": "why"},
+				Columns: []string{"time", "f1", "f2", "other", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+						12.0,
+						13.5,
+						56.0,
+						1.0,
+					},
+				},
+			},
+		},
+	}
+	tmInit := func(tm *kapacitor.TaskMaster) {
+		tm.SideloadService = sideload.NewService(diagService.NewSideloadHandler())
+	}
+
+	testStreamerWithOutput(t, "TestStream_Sideload", script, 1*time.Second, er, true, tmInit)
 }
 
 func TestStream_InfluxDBOut(t *testing.T) {
@@ -9520,7 +11092,7 @@ stream
 
 func TestStream_TopSelector(t *testing.T) {
 	var script = `
-var topScores = stream
+stream
     |from()
 		.measurement('scores')
 		// Get the most recent score for each player
@@ -9533,14 +11105,7 @@ var topScores = stream
     // Calculate the top 5 scores per game
     |groupBy('game')
     |top(5, 'last', 'player')
-
-topScores
-    |httpOut('top_scores')
-
-topScores
-    |sample(4s)
-    |count('top')
-    |httpOut('top_scores_sampled')
+    |httpOut('TestStream_TopSelector')
 `
 
 	tw := time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC)
@@ -9573,78 +11138,73 @@ topScores
 		},
 	}
 
-	sampleER := models.Result{
+	testStreamerWithOutput(t, "TestStream_TopSelector", script, 10*time.Second, er, false, nil)
+}
+
+func TestStream_Sample_Count(t *testing.T) {
+	var script = `
+stream
+    |from()
+		.measurement('packets')
+    |sample(2)
+	|window()
+		.every(4s)
+		.period(4s)
+		.align()
+	|httpOut('TestStream_Sample')
+`
+
+	er := models.Result{
 		Series: models.Rows{
 			{
-				Name:    "scores",
-				Tags:    map[string]string{"game": "g0"},
-				Columns: []string{"time", "count"},
-				Values: [][]interface{}{{
-					time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-					5.0,
-				}},
-			},
-			{
-				Name:    "scores",
-				Tags:    map[string]string{"game": "g1"},
-				Columns: []string{"time", "count"},
-				Values: [][]interface{}{{
-					time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-					5.0,
-				}},
+				Name:    "packets",
+				Columns: []string{"time", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						1004.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						1006.0,
+					},
+				},
 			},
 		},
 	}
 
-	clock, et, replayErr, tm := testStreamer(t, "TestStream_TopSelector", script, nil)
-	defer tm.Close()
+	testStreamerWithOutput(t, "TestStream_Sample", script, 12*time.Second, er, false, nil)
+}
 
-	err := fastForwardTask(clock, et, replayErr, tm, 10*time.Second)
-	if err != nil {
-		t.Error(err)
-	}
+func TestStream_Sample_Time(t *testing.T) {
+	var script = `
+stream
+    |from()
+		.measurement('packets')
+    |sample(3s)
+	|window()
+		.every(4s)
+		.period(4s)
+		.align()
+	|httpOut('TestStream_Sample')
+`
 
-	// Get the result
-	output, err := et.GetOutput("top_scores")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := http.Get(output.Endpoint())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Assert we got the expected result
-	result := models.Result{}
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if eq, msg := compareResults(er, result); !eq {
-		t.Error(msg)
-	}
-
-	// Get the result
-	output, err = et.GetOutput("top_scores_sampled")
-	if err != nil {
-		t.Fatal(err)
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "packets",
+				Columns: []string{"time", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						1006.0,
+					},
+				},
+			},
+		},
 	}
 
-	resp, err = http.Get(output.Endpoint())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Assert we got the expected result
-	result = models.Result{}
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if eq, msg := compareResults(sampleER, result); !eq {
-		t.Error(msg)
-	}
+	testStreamerWithOutput(t, "TestStream_Sample", script, 12*time.Second, er, false, nil)
 }
 
 func TestStream_DerivativeCardinality(t *testing.T) {
@@ -9879,7 +11439,7 @@ stream
 		},
 		"max3": map[string]interface{}{
 			"emitted":             int64(0),
-			"working_cardinality": int64(0),
+			"working_cardinality": int64(9),
 			"avg_exec_time_ns":    int64(0),
 			"errors":              int64(0),
 			"collected":           int64(81),
@@ -10136,7 +11696,7 @@ stream
 	}
 
 	scaleUpdates := make(chan k8s.Scale, 100)
-	k8sAutoscale := k8sAutoscale{}
+	k8sAutoscale := k8stest.Client{}
 	k8sAutoscale.ScalesGetFunc = func(kind, name string) (*k8s.Scale, error) {
 		var replicas int32
 		switch name {
@@ -10535,7 +12095,7 @@ func testStreamer(
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.Open(path.Join(dir, "data", name+".srpl"))
+	data, err := os.Open(path.Join(dir, "testdata", name+".srpl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10579,6 +12139,68 @@ func fastForwardTask(
 		return err
 	}
 	return nil
+}
+
+func testStreamerWithInputChannel(
+	t *testing.T,
+	name,
+	script string,
+	points <-chan edge.PointMessage,
+	clck clock.Clock,
+	tmInit func(tm *kapacitor.TaskMaster),
+) (cleanup func()) {
+	if testing.Verbose() {
+		wlog.SetLevel(wlog.DEBUG)
+	} else {
+		wlog.SetLevel(wlog.OFF)
+	}
+
+	// Create a new execution env
+	tm, err := createTaskMaster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tmInit != nil {
+		tmInit(tm)
+	}
+	tm.Open()
+
+	//Create the task
+	task, err := tm.NewTask(name, script, kapacitor.StreamTask, dbrps, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	//Start the task
+	et, err := tm.StartTask(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replay data from channel to exectutor
+	stream, err := tm.Stream(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayErr := kapacitor.ReplayStreamFromChan(clck, points, stream, false)
+
+	// Return cleanup function to caller to execute after data has all been sent
+	cleanup = func() {
+		// Wait till the replay has finished
+		if err := <-replayErr; err != nil {
+			t.Error(err)
+		}
+		tm.Drain()
+		et.StopStats()
+		// Wait till the task is finished
+		if err := et.Wait(); err != nil {
+			t.Error(err)
+		}
+
+		t.Log(string(et.Task.Dot()))
+		return
+	}
+	return
 }
 
 func testStreamerNoOutput(
@@ -10768,13 +12390,14 @@ func compareListIgnoreOrder(got, exp []interface{}, cmpF func(got, exp interface
 }
 
 func createTaskMaster() (*kapacitor.TaskMaster, error) {
-	tm := kapacitor.NewTaskMaster("testStreamer", logService)
+	d := diagService.NewKapacitorHandler()
+	tm := kapacitor.NewTaskMaster("testStreamer", newServerInfo(), d)
 	httpdService := newHTTPDService()
 	tm.HTTPDService = httpdService
 	tm.TaskStore = taskStore{}
 	tm.DeadmanService = deadman{}
-	tm.HTTPPostService = httppost.NewService(nil, logService.NewLogger("[httppost] ", log.LstdFlags))
-	as := alertservice.NewService(logService.NewLogger("[alert] ", log.LstdFlags))
+	tm.HTTPPostService, _ = httppost.NewService(nil, diagService.NewHTTPPostHandler())
+	as := alertservice.NewService(diagService.NewAlertServiceHandler())
 	as.StorageService = storagetest.New()
 	as.HTTPDService = httpdService
 	if err := as.Open(); err != nil {

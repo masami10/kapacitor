@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,10 +13,18 @@ import (
 
 	client "github.com/masami10/kapacitor/client/v1"
 	"github.com/masami10/kapacitor/services/config"
+	"github.com/masami10/kapacitor/services/diagnostic"
 	"github.com/masami10/kapacitor/services/httpd"
 	"github.com/masami10/kapacitor/services/httpd/httpdtest"
 	"github.com/masami10/kapacitor/services/storage/storagetest"
 )
+
+var diagService *diagnostic.Service
+
+func init() {
+	diagService = diagnostic.NewService(diagnostic.NewConfig(), ioutil.Discard, ioutil.Discard)
+	diagService.Open()
+}
 
 type SectionA struct {
 	Option1 string `override:"option-1"`
@@ -49,7 +55,7 @@ type TestConfig struct {
 
 func OpenNewSerivce(testConfig interface{}, updates chan<- config.ConfigUpdate) (*config.Service, *httpdtest.Server) {
 	c := config.NewConfig()
-	service := config.NewService(c, testConfig, log.New(os.Stderr, "[config] ", log.LstdFlags), updates)
+	service := config.NewService(c, testConfig, diagService.NewConfigOverrideHandler(), updates)
 	service.StorageService = storagetest.New()
 	server := httpdtest.NewServer(testing.Verbose())
 	service.HTTPDService = server

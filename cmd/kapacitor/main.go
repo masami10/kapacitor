@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,10 +11,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	humanize "github.com/dustin/go-humanize"
@@ -52,6 +56,8 @@ Commands:
 	define-topic-handler  Create/update an alert handler for a topic.
 	replay                Replay a recording to a task.
 	replay-live           Replay data against a task without recording it.
+	watch                 Watch logs for a task.
+	logs                  Follow arbitrary Kapacitor logs.
 	enable                Enable and start running a task with live data.
 	disable               Stop running a task.
 	reload                Reload a running task with an updated task definition.
@@ -153,6 +159,12 @@ func main() {
 		}
 		commandArgs = args
 		commandF = doReplayLive
+	case "watch":
+		commandArgs = args
+		commandF = doWatch
+	case "logs":
+		commandArgs = args
+		commandF = doLogs
 	case "enable":
 		commandArgs = args
 		commandF = doEnable
@@ -284,6 +296,10 @@ func doHelp(args []string) error {
 			showTopicUsage()
 		case "backup":
 			backupUsage()
+		case "watch":
+			watchUsage()
+		case "logs":
+			logsUsage()
 		case "level":
 			levelUsage()
 		case "help":
@@ -542,6 +558,7 @@ var (
 	dtype       = defineFlags.String("type", "", "The task type (stream|batch)")
 	dtemplate   = defineFlags.String("template", "", "Optional template ID")
 	dvars       = defineFlags.String("vars", "", "Optional path to a JSON vars file")
+	dfile       = defineFlags.String("file", "", "Optional path to a YAML or JSON template task file")
 	dnoReload   = defineFlags.Bool("no-reload", false, "Do not reload the task even if it is enabled")
 	ddbrp       = make(dbrps, 0)
 )
@@ -687,33 +704,89 @@ func doDefine(args []string) error {
 		}
 	}
 
+	fileVars := client.TaskVars{}
+	if *dfile != "" {
+		f, err := os.Open(*dfile)
+		if err != nil {
+			return errors.Wrapf(err, "failed to open file %s", *dfile)
+		}
+		data, err := ioutil.ReadAll(f)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read task vars file %q", *dfile)
+		}
+		defer f.Close()
+		switch ext := path.Ext(*dfile); ext {
+		case ".yaml", ".yml":
+			if err := yaml.Unmarshal(data, &fileVars); err != nil {
+				return errors.Wrapf(err, "failed to unmarshal yaml task vars file %q", *dfile)
+			}
+		case ".json":
+			if err := json.Unmarshal(data, &fileVars); err != nil {
+				return errors.Wrapf(err, "failed to unmarshal json task vars file %q", *dfile)
+			}
+		default:
+			return errors.New("bad file extension. Must be YAML or JSON")
+
+		}
+	}
+
 	l := cli.TaskLink(id)
 	task, _ := cli.Task(l, nil)
 	var err error
 	if task.ID == "" {
-		_, err = cli.CreateTask(client.CreateTaskOptions{
-			ID:         id,
-			TemplateID: *dtemplate,
-			Type:       ttype,
-			DBRPs:      ddbrp,
-			TICKscript: script,
-			Vars:       vars,
-			Status:     client.Disabled,
-		})
-	} else {
-		_, err = cli.UpdateTask(
-			l,
-			client.UpdateTaskOptions{
+		if *dfile != "" {
+			o, err := fileVars.CreateTaskOptions()
+			if err != nil {
+				return err
+			}
+			_, err = cli.CreateTask(o)
+			if err != nil {
+				return err
+			}
+		} else {
+			o := client.CreateTaskOptions{
+				ID:         id,
 				TemplateID: *dtemplate,
 				Type:       ttype,
 				DBRPs:      ddbrp,
 				TICKscript: script,
 				Vars:       vars,
-			},
-		)
-	}
-	if err != nil {
-		return err
+				Status:     client.Disabled,
+			}
+			_, err = cli.CreateTask(o)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		if *dfile != "" {
+			o, err := fileVars.UpdateTaskOptions()
+			if err != nil {
+				return err
+			}
+			_, err = cli.UpdateTask(
+				l,
+				o,
+			)
+			if err != nil {
+				return err
+			}
+		} else {
+			o := client.UpdateTaskOptions{
+				TemplateID: *dtemplate,
+				Type:       ttype,
+				DBRPs:      ddbrp,
+				TICKscript: script,
+				Vars:       vars,
+			}
+			_, err = cli.UpdateTask(
+				l,
+				o,
+			)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	if !*dnoReload && task.Status == client.Enabled {
@@ -822,7 +895,7 @@ func doDefineTemplate(args []string) error {
 }
 
 func defineTopicHandlerUsage() {
-	var u = `Usage: kapacitor define-topic-handler <topic id> <handler id> <path to handler spec file>
+	var u = `Usage: kapacitor define-topic-handler <path to handler spec file>
 
 	Create or update a handler.
 
@@ -832,7 +905,7 @@ For example:
 
 	Define a handler using the slack.yaml file:
 
-		$ kapacitor define-handler system my_handler slack.yaml
+		$ kapacitor define-topic-handler slack.yaml
 
 Options:
 `
@@ -840,14 +913,12 @@ Options:
 }
 
 func doDefineTopicHandler(args []string) error {
-	if len(args) != 3 {
-		fmt.Fprintln(os.Stderr, "Must provide a topic ID, a handler ID and a path to a handler file.")
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "Must provide a path to a handler file.")
 		defineTopicHandlerUsage()
 		os.Exit(2)
 	}
-	topic := args[0]
-	handlerID := args[1]
-	p := args[2]
+	p := args[0]
 	f, err := os.Open(p)
 	if err != nil {
 		return errors.Wrapf(err, "failed to open handler spec file %q", p)
@@ -857,7 +928,7 @@ func doDefineTopicHandler(args []string) error {
 	var ho client.TopicHandlerOptions
 	ext := path.Ext(p)
 	switch ext {
-	case ".yaml":
+	case ".yaml", ".yml":
 		data, err := ioutil.ReadAll(f)
 		if err != nil {
 			return errors.Wrapf(err, "failed to read handler file %q", p)
@@ -870,12 +941,11 @@ func doDefineTopicHandler(args []string) error {
 			return errors.Wrapf(err, "failed to unmarshal json handler file %q", p)
 		}
 	}
-	ho.ID = handlerID
 
-	l := cli.TopicHandlerLink(topic, ho.ID)
+	l := cli.TopicHandlerLink(ho.Topic, ho.ID)
 	handler, _ := cli.TopicHandler(l)
 	if handler.ID == "" {
-		_, err = cli.CreateTopicHandler(cli.TopicHandlersLink(topic), ho)
+		_, err = cli.CreateTopicHandler(cli.TopicHandlersLink(ho.Topic), ho)
 	} else {
 		_, err = cli.ReplaceTopicHandler(l, ho)
 	}
@@ -2013,7 +2083,7 @@ func doDelete(args []string) error {
 
 // Level
 func levelUsage() {
-	var u = `Usage: kapacitor level (debug|info|warn|error)
+	var u = `Usage: kapacitor level (debug|info|error)
 
 	Sets the logging level on the kapacitord server.
 `
@@ -2244,5 +2314,83 @@ func doBackup(args []string) error {
 	if n != size {
 		return fmt.Errorf("failed to download entire backup, only wrote %d bytes out of a total %d bytes.", n, size)
 	}
+	return nil
+}
+
+func watchUsage() {
+	var u = `Usage: kapacitor watch <task id> [<tags> ...]
+
+	Watch logs associated with a task.
+
+	Examples:
+
+		$ kapacitor watch mytask
+		$ kapacitor watch mytask node=log5
+`
+	fmt.Fprintln(os.Stderr, u)
+}
+
+func doWatch(args []string) error {
+	m := map[string]string{}
+	if len(args) < 1 {
+		return errors.New("must provide task ID.")
+	}
+	m["task"] = args[0]
+	for _, s := range args[1:] {
+		pair := strings.Split(s, "=")
+		if len(pair) != 2 {
+			return fmt.Errorf("bad keyvalue pair: '%v'", s)
+		}
+		m[pair[0]] = pair[1]
+	}
+
+	return tailLogs(m)
+}
+
+func logsUsage() {
+	var u = `Usage: kapacitor logs [<tags> ...]
+
+	Watch arbitrary kapacitor logs.
+
+		$ kapacitor logs service=http lvl=error
+		$ kapacitor logs service=http lvl=info+
+`
+	fmt.Fprintln(os.Stderr, u)
+}
+
+func doLogs(args []string) error {
+	m := map[string]string{}
+	for _, s := range args {
+		pair := strings.Split(s, "=")
+		if len(pair) != 2 {
+			return fmt.Errorf("bad keyvalue pair: '%v'", s)
+		}
+		m[pair[0]] = pair[1]
+	}
+
+	return tailLogs(m)
+}
+
+func tailLogs(m map[string]string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := false
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	var mu sync.Mutex
+	go func() {
+		<-sigs
+		cancel()
+		mu.Lock()
+		defer mu.Unlock()
+		done = true
+	}()
+
+	err := cli.Logs(ctx, os.Stdout, m)
+	mu.Lock()
+	defer mu.Unlock()
+	if err != nil && !done {
+		return errors.Wrap(err, "failed to retrieve logs")
+	}
+
 	return nil
 }

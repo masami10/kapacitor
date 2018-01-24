@@ -2,12 +2,13 @@ package scraper
 
 import (
 	"fmt"
-	"log"
 	"math"
 	"sync"
 	"sync/atomic"
 
+	"github.com/masami10/kapacitor/edge"
 	"github.com/masami10/kapacitor/models"
+	plog "github.com/prometheus/common/log"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/retrieval"
@@ -19,10 +20,13 @@ var (
 	_ storage.SampleAppender = &Service{}
 )
 
+// Prometheus logger
+type Diagnostic plog.Logger
+
 // Service represents the scraper manager
 type Service struct {
 	PointsWriter interface {
-		WriteKapacitorPoint(models.Point) error
+		WriteKapacitorPoint(edge.PointMessage) error
 	}
 	mu sync.Mutex
 	wg sync.WaitGroup
@@ -34,7 +38,7 @@ type Service struct {
 
 	configs atomic.Value // []Config
 
-	logger *log.Logger
+	diag Diagnostic
 
 	discoverers []Discoverer
 
@@ -48,12 +52,12 @@ type Service struct {
 }
 
 // NewService creates a new scraper service
-func NewService(c []Config, l *log.Logger) *Service {
+func NewService(c []Config, d Diagnostic) *Service {
 	s := &Service{
-		logger: l,
+		diag: d,
 	}
 	s.storeConfigs(c)
-	s.mgr = retrieval.NewTargetManager(s, NewLogger(l))
+	s.mgr = retrieval.NewTargetManager(s, d)
 	return s
 }
 
@@ -182,14 +186,15 @@ func (s *Service) Append(sample *model.Sample) error {
 		"value": value,
 	}
 
-	return s.PointsWriter.WriteKapacitorPoint(models.Point{
-		Database:        db,
-		RetentionPolicy: rp,
-		Name:            tags[model.MetricNameLabel],
-		Tags:            tags,
-		Fields:          fields,
-		Time:            sample.Timestamp.Time(),
-	})
+	return s.PointsWriter.WriteKapacitorPoint(edge.NewPointMessage(
+		tags[model.MetricNameLabel],
+		db,
+		rp,
+		models.Dimensions{},
+		fields,
+		tags,
+		sample.Timestamp.Time(),
+	))
 }
 
 // NeedsThrottling conforms to SampleAppender and never returns true currently.

@@ -2,13 +2,12 @@ package alert
 
 import (
 	"fmt"
-	"log"
 	"path"
 	"sort"
 	"sync"
 
 	"github.com/masami10/kapacitor/expvar"
-	"github.com/masami10/kapacitor/vars"
+	"github.com/masami10/kapacitor/server/vars"
 )
 
 const (
@@ -20,14 +19,11 @@ type Topics struct {
 	mu sync.RWMutex
 
 	topics map[string]*Topic
-
-	logger *log.Logger
 }
 
-func NewTopics(l *log.Logger) *Topics {
+func NewTopics() *Topics {
 	s := &Topics{
 		topics: make(map[string]*Topic),
-		logger: l,
 	}
 	return s
 }

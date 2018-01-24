@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"path"
 	"sync/atomic"
 	"time"
+
+	"github.com/masami10/kapacitor/keyvalue"
 
 	"net/url"
 
@@ -30,24 +31,28 @@ type tokenInfo struct {
 	RefreshTokenExpiry int64  `json:"refreshToken_expiry"`
 }
 
+type Diagnostic interface {
+	WithContext(ctx ...keyvalue.T) Diagnostic
+
+	Error(msg string, err error)
+}
+
 type Service struct {
 	configValue atomic.Value
 	clientValue atomic.Value
-	logger      *log.Logger
+	diag        Diagnostic
 	client      *http.Client
 	tokenInfo   atomic.Value
 }
 
-func NewService(c Config, l *log.Logger) (*Service, error) {
+func NewService(c Config, d Diagnostic) (*Service, error) {
 	tlsConfig, err := getTLSConfig(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
 	if err != nil {
 		return nil, err
 	}
-	if tlsConfig.InsecureSkipVerify {
-		l.Println("W! iotseed service is configured to skip ssl verification")
-	}
+
 	s := &Service{
-		logger: l,
+		diag: d,
 	}
 	s.configValue.Store(c)
 	s.clientValue.Store(&http.Client{
@@ -83,9 +88,6 @@ func (s *Service) Update(newConfig []interface{}) error {
 		tlsConfig, err := getTLSConfig(c.SSLCA, c.SSLCert, c.SSLKey, c.InsecureSkipVerify)
 		if err != nil {
 			return err
-		}
-		if tlsConfig.InsecureSkipVerify {
-			s.logger.Println("W! iotseed service is configured to skip ssl verification")
 		}
 		s.configValue.Store(c)
 		s.clientValue.Store(&http.Client{
@@ -147,7 +149,7 @@ func (s *Service) login() error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("认证失败", resp.StatusCode)
+		return fmt.Errorf("认证失败%d", resp.StatusCode)
 	}
 
 	res, err := ioutil.ReadAll(resp.Body)
