@@ -117,6 +117,7 @@ type Config struct {
 	DefaultRetentionPolicy string `toml:"default-retention-policy"`
 
 	EtcdServers            string  `toml:"etcd_servers"`
+	EtcdHearbeatInterval   int64   `toml:"etcd_hearbeat_inteval"`
 	TaskSchedAlgo          string  `toml:"task_sched_algo"`
 
 	Commander command.Commander `toml:"-"`

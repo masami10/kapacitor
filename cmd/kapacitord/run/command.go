@@ -154,14 +154,6 @@ func (cmd *Command) Run(args ...string) error {
 	go cmd.monitorServerErrors()
 
 	// tasks
-	if err != nil {
-		cmd.Logger.Fatal(err)
-	}
-
-	if err != nil {
-		cmd.Logger.Fatal(err)
-	}
-	//
 	go taskEtcd.WatchTaskid(config)
 
 	//　watch kapacitor hostname
