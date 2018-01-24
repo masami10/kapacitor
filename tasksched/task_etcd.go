@@ -94,7 +94,15 @@ func (te *TaskEtcd) RegistryToEtcd(c *server.Config, kch chan int) {
 	kvc := clientv3.NewKV(cli)
 	_, err = kvc.Txn(context.TODO()).
 		If(clientv3.Compare(clientv3.Value(hostnameKey), "=", hostName)).
-		Then(clientv3.OpPut(hostnameRevKey, "0"), clientv3.OpPut(totalTaskNumKey, "0")).
+		Then(clientv3.OpPut(hostnameRevKey, "0")).
+		Commit()
+	if err != nil {
+		te.Logger.Fatal("E! txn failed ", err)
+	}
+
+	_, err = kvc.Txn(context.TODO()).
+		If(clientv3.Compare(clientv3.CreateRevision(totalTaskNumKey), "=", 0)).
+		Then(clientv3.OpPut(totalTaskNumKey, "0")).
 		Commit()
 	if err != nil {
 		te.Logger.Fatal("E! txn failed ", err)
@@ -143,9 +151,10 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 
 				// 事务修改etcd任务所在节点信息
 				taskIdKey := prefixTasksIdKey + taskId
+				isCreatedKey := prefixTasksIsCreatedKey + taskId
 				kvc := clientv3.NewKV(cli)
 				kresp, err := kvc.Txn(context.TODO()).
-					If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskId)).
+					If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskId), clientv3.Compare(clientv3.CreateRevision(isCreatedKey), "=", 0)).
 					Then(clientv3.OpPut(taskIdKey, c.Hostname)).
 					Commit()
 				if err != nil {
@@ -204,7 +213,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 						//if err != nil {
 						//	te.Logger.Println("E! json marshal task error: ", err)
 						//}
-						respData := fmt.Sprintf(respTemplate, statusCode, httpd.MarshalJSON(t, true))
+						respData := fmt.Sprintf(respTemplate, statusCode, httpd.MarshalJSON(t, false))
 
 						//fmt.Println("555555555555555", string(r))
 
@@ -214,7 +223,6 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 						}
 
 						//
-						isCreatedKey := prefixTasksIsCreatedKey + taskId
 						taskIdInNodeKey := prefixTasksInNodeKey + c.Hostname + "/" + taskId
 						kvc := clientv3.NewKV(cli)
 						taskIdKey := prefixTasksIdKey + taskId
@@ -341,7 +349,7 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 				//if err != nil {
 				//	te.Logger.Println("E! faile to json marshal task: ", err)
 				//}
-				respData := fmt.Sprintf(respTemplate, statusCode, httpd.MarshalJSON(t, true))
+				respData := fmt.Sprintf(respTemplate, statusCode, httpd.MarshalJSON(t, false))
 
 				//fmt.Println("555555555555555", string(rt))
 
@@ -361,7 +369,7 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 				//
 				//fmt.Println(string(r), "34444443333333333333333333444444444444444")
 
-				taskConfigData := httpd.MarshalJSON(rawTask, true)
+				taskConfigData := httpd.MarshalJSON(rawTask, false)
 
 				_, err = kvc.Txn(context.TODO()).
 					If(clientv3.Compare(clientv3.ModRevision(prefixOpPatchKey+taskId), "=", wresp.Header.GetRevision())).
@@ -383,6 +391,7 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 	rch := cli.Watch(context.TODO(), opDeleteKey, clientv3.WithPrefix())
 	kvc := clientv3.NewKV(cli)
 	for wresp := range rch {
+		revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
 		for _, ev := range wresp.Events {
 			if ev.Type.String() == "PUT" {
 				taskId := string(ev.Kv.Value)
@@ -410,32 +419,60 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 				fmt.Println("7777777777777777777777777", taskHostname)
 
 				// 删除kapacitor上任务, 任务总数减一
-				err = deleteTask(taskId, te.Kcli)
+				statusCode, derr := deleteTask(taskId, te.Kcli)
+
+				grResp, gerr := cli.Grant(context.TODO(), 60)
+				if gerr != nil {
+					te.Logger.Fatal("E! failed to grant", err)
+				}
+
+				if derr != nil {
+
+					respData := fmt.Sprintf(respTemplate, statusCode, `"`+derr.Error()+`"`)
+					_, perr := cli.Put(context.TODO(), prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))
+					if perr != nil {
+						te.Logger.Fatal("E! faliled to put response info: ", perr)
+					}
+					continue
+				}
+
 
 				var totalTaskNum string
+				var newTotalTaskNum string
 
-				gresp, err = cli.Get(context.TODO(), totalTaskNumKey)
-				if err != nil {
-					te.Logger.Fatal("E! get total task num error: ", err)
-				}
-				for _, ev := range gresp.Kvs {
-					if string(ev.Key) == totalTaskNumKey {
-						num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
-						totalTaskNum = strconv.FormatInt(num-1, 10)
+				for {
+					gresp, err = cli.Get(context.TODO(), totalTaskNumKey)
+					if err != nil {
+						te.Logger.Fatal("E! get total task num error: ", err)
+					}
+					for _, ev := range gresp.Kvs {
+						if string(ev.Key) == totalTaskNumKey {
+							num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
+							totalTaskNum = strconv.FormatInt(num, 10)
+							newTotalTaskNum = strconv.FormatInt(num-1, 10)
+						}
+					}
+
+					respData := fmt.Sprintf(respTemplate, statusCode, `""`)
+
+					tresp, terr := kvc.Txn(context.TODO()).
+						If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskHostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+						Then(clientv3.OpDelete(taskIdKey),
+						clientv3.OpDelete(prefixTasksInNodeKey+taskHostname+"/"+taskId),
+						clientv3.OpDelete(prefixTasksConfigKey+taskId),
+						clientv3.OpDelete(prefixTasksIsCreatedKey+taskId),
+						clientv3.OpPut(totalTaskNumKey, newTotalTaskNum),
+						clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))).
+						Commit()
+					if terr != nil {
+						te.Logger.Fatal("E! failed to delete etcd task info: ", err)
+					}
+					fmt.Println(tresp.Succeeded)
+					if tresp.Succeeded == true {
+						break
 					}
 				}
 
-				_, terr := kvc.Txn(context.TODO()).
-					If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskHostname)).
-					Then(clientv3.OpDelete(taskIdKey),
-					clientv3.OpDelete(prefixTasksInNodeKey+taskHostname+"/"+taskId),
-					clientv3.OpDelete(prefixTasksConfigKey+taskId),
-					clientv3.OpDelete(prefixTasksIsCreatedKey+taskId),
-					clientv3.OpPut(totalTaskNumKey, totalTaskNum)).
-					Commit()
-				if terr != nil {
-					te.Logger.Fatal("E! failed to delete etcd task info: ", err)
-				}
 			}
 		}
 	}
@@ -638,7 +675,7 @@ func createTask(task_config string, kcli *client.Client) (client.Task, string, e
 	//client := &http.Client{}
 	url := "http://localhost:9092/kapacitor/v1/tasks"
 
-	return doTask("POST", url, task_config, kcli)
+	return doTask("POST", url, task_config, kcli, http.StatusOK)
 
 	//t := client.Task{}
 	//
@@ -665,7 +702,7 @@ func createTask(task_config string, kcli *client.Client) (client.Task, string, e
 func updateTask(id string, data string, kcli *client.Client) (client.Task, string, error) {
 	url := "http://localhost:9092/kapacitor/v1/tasks/" + id
 
-	return doTask("PATCH", url, data, kcli)
+	return doTask("PATCH", url, data, kcli, http.StatusOK)
 
 	//t := client.Task{}
 	//
@@ -688,28 +725,27 @@ func updateTask(id string, data string, kcli *client.Client) (client.Task, strin
 	//return t, statusCode, err
 }
 
-func deleteTask(id string, kcli *client.Client) error {
+func deleteTask(id string, kcli *client.Client) (string, error) {
 	url := "http://localhost:9092/kapacitor/v1/tasks/" + id
 
-	_, _, err := doTask("DELETE", url, "", kcli)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return "500", err
+	}
+	req.Header.Set("Content-Type", "application/json")
 
-	return err
+	_, err = kcli.Do(req, nil, http.StatusNoContent)
 
-	//var buf bytes.Buffer
-	//req, err := http.NewRequest("DELETE", url, &buf)
-	//if err != nil {
-	//	return err
-	//}
-	//req.Header.Set("Content-Type", "application/json")
-	//
-	//t := client.Task{}
-	//
-	//_, err = kcli.Do(req, &t, http.StatusOK)
-	//
-	//return err
+	statusCode := strconv.Itoa(http.StatusNoContent)
+	if err != nil {
+		fmt.Println(err)
+		statusCode = "400"
+	}
+
+	return statusCode, err
 }
 
-func doTask(method string, url string, postData string, kcli *client.Client) (client.Task, string, error) {
+func doTask(method string, url string, postData string, kcli *client.Client, code int) (client.Task, string, error) {
 	t := client.Task{}
 
 	var buf bytes.Buffer
@@ -722,11 +758,12 @@ func doTask(method string, url string, postData string, kcli *client.Client) (cl
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	_, err = kcli.Do(req, &t, http.StatusOK)
+	_, err = kcli.Do(req, &t, code)
 
 
-	statusCode := "200"
+	statusCode := strconv.Itoa(code)
 	if err != nil {
+		fmt.Println(err)
 		statusCode = "400"
 	}
 

@@ -6,7 +6,6 @@ import (
 	"context"
 	"time"
 	"log"
-	"fmt"
 )
 
 func cfs(cli *clientv3.Client, hostname string) time.Duration {
@@ -15,7 +14,7 @@ func cfs(cli *clientv3.Client, hostname string) time.Duration {
 	taskNum := int64(0)
 	resp, err := cli.Get(context.TODO(), totalTaskNumKey)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("E! failed to get total task num", err)
 	}
 	for _, ev := range resp.Kvs {
 		if string(ev.Key) == totalTaskNumKey {
@@ -36,9 +35,6 @@ func cfs(cli *clientv3.Client, hostname string) time.Duration {
 
 	// 5. 计算延迟抓取时间
 	diff := nodeTaskNum - avgTaskNum
-
-	fmt.Println("6666666666666666666666666666666666666666666666666677777777777777777777777777777777")
-	fmt.Println(nodeTaskNum, avgTaskNum, diff)
 
 	delay := int64(0)
 	if diff >= 0 {
