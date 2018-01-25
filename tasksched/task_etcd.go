@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"github.com/masami10/kapacitor/services/httpd"
+	"github.com/masami10/kapacitor/uuid"
 )
 
 const (
@@ -74,8 +75,8 @@ func NewTaskEtcd(c *server.Config, logService logging.Interface) (*TaskEtcd, err
 func (te *TaskEtcd) RegistryToEtcd(c *server.Config, kch chan int) {
 	cli := te.Cli
 	hostName := c.Hostname
-	hostnameKey := prefixHostnameKey + hostName
-	hostnameRevKey := prefixHostnameRevKey + hostName
+	hostnameId := uuid.New().String()
+	hostnameKey := prefixHostnameKey + hostName + "/" + hostnameId
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	// grant
@@ -90,6 +91,8 @@ func (te *TaskEtcd) RegistryToEtcd(c *server.Config, kch chan int) {
 	if err != nil {
 		te.Logger.Fatal("E! failed to put hostname key", err)
 	}
+
+	hostnameRevKey := prefixHostnameRevKey + hostName + "/" + hostnameId
 
 	kvc := clientv3.NewKV(cli)
 	_, err = kvc.Txn(context.TODO()).
@@ -486,13 +489,14 @@ func (te *TaskEtcd) WatchHostname(c *server.Config) {
 	rch := cli.Watch(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
 
 	for wresp := range rch {
-		revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
+		//revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
 		for _, ev := range wresp.Events {
 			fmt.Printf("%s %q : %q\n", ev.Type, ev.Kv.Key, ev.Kv.Value)
 			if ev.Type.String() == "DELETE" {
 				downHostname := strings.Split(string(ev.Kv.Key), "/")[2]
+				downHostnameId := strings.Split(string(ev.Kv.Key), "/")[3]
 
-				downRevKey := prefixHostnameRevKey + downHostname
+				downRevKey := prefixHostnameRevKey + downHostname + "/" + downHostnameId
 
 				// 把is_created设置成false
 
@@ -517,26 +521,18 @@ func (te *TaskEtcd) WatchHostname(c *server.Config) {
 					ops = append(ops, clientv3.OpPut(isCreatedKey, "false"))
 					ops = append(ops, clientv3.OpDelete(taskInNodeKey))
 				}
-				// 修改rev值
-				ops = append(ops, clientv3.OpPut(downRevKey, revision))
+				// 删除rev key
+				ops = append(ops, clientv3.OpDelete(downRevKey))
 
-				// 如果事务数量过多会失败,所以设置一次最多执行100个事务
-				l := len(ops)
-				step := 100
-				for i := 0; i < l; i = i + step {
-					end := i + step
-					if end > l {
-						end = l
-					}
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					_, err := kvc.Txn(ctx).
-						If(clientv3.Compare(clientv3.Value(downRevKey), "!=", revision)).
-						Then(ops[i:end]...).
-						Commit()
-					cancel()
-					if err != nil {
-						te.Logger.Fatal("E! failed update down kapacitor's tasks ", err)
-					}
+				//
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, err = kvc.Txn(ctx).
+					If(clientv3.Compare(clientv3.CreateRevision(downRevKey), "!=", 0)).
+					Then(ops...).
+					Commit()
+				cancel()
+				if err != nil {
+					te.Logger.Fatal("E! failed update down kapacitor's tasks ", err)
 				}
 
 			}
