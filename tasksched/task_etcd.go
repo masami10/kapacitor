@@ -313,7 +313,8 @@ func WaitForTaskCreated(taskId string, cli *clientv3.Client, l *log.Logger) stri
 			}
 		}
 		if isTaskCreated != "true" {
-			fmt.Println(runtime.Caller(1), taskId, "isTaskCreated", isTaskCreated)
+			fmt.Println(runtime.Caller(1))
+			fmt.Println(taskId, "isTaskCreated", isTaskCreated)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -370,7 +371,8 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 						isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
 						break
 					}
-					fmt.Println(runtime.Caller(1), taskId, taskHostname)
+					fmt.Println(runtime.Caller(1))
+					fmt.Println(taskId, taskHostname)
 
 					time.Sleep(10 * time.Millisecond)
 				}
@@ -470,7 +472,8 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 						isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
 						break
 					}
-					fmt.Println(runtime.Caller(1), taskId, taskHostname)
+					fmt.Println(runtime.Caller(1))
+					fmt.Println(taskId, taskHostname)
 
 					time.Sleep(10 * time.Microsecond)
 				}
@@ -531,7 +534,8 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 					if terr != nil {
 						te.Logger.Fatal("E! failed to delete etcd task info: ", err)
 					}
-					fmt.Println(runtime.Caller(1), tresp.Succeeded)
+					fmt.Println(runtime.Caller(1))
+					fmt.Println(tresp.Succeeded)
 					if tresp.Succeeded == true {
 						break
 					}
