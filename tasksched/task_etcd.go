@@ -17,6 +17,7 @@ import (
 	"github.com/masami10/kapacitor/services/httpd"
 	"github.com/masami10/kapacitor/uuid"
 	"runtime"
+	"sync"
 )
 
 const (
@@ -225,22 +226,22 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 							kvc := clientv3.NewKV(cli)
 							taskIdKey := prefixTasksIdKey + taskId
 
-							_, err = kvc.Txn(context.TODO()).
-								If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
-								Then(clientv3.OpPut(isCreatedKey, "true"),
-								clientv3.OpPut(taskIdInNodeKey, taskId),
-								clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
-								clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo))).
-								Commit()
-							if err != nil {
-								te.Logger.Fatal("E! put task info error: ", err)
-							}
+							//_, err = kvc.Txn(context.TODO()).
+							//	If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
+							//	Then(clientv3.OpPut(isCreatedKey, "true"),
+							//	clientv3.OpPut(taskIdInNodeKey, taskId),
+							//	clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
+							//	clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo))).
+							//	Commit()
+							//if err != nil {
+							//	te.Logger.Fatal("E! put task info error: ", err)
+							//}
+
+							var totalTaskNum string
+							var newTotalTaskNum string
 
 							for {
 								// 把任务数量加一
-								var totalTaskNum string
-								var newTotalTaskNum string
-								fmt.Println(runtime.Caller(1))
 
 								resp, err := cli.Get(context.TODO(), totalTaskNumKey)
 								if err != nil {
@@ -253,14 +254,25 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 										newTotalTaskNum = strconv.FormatInt(num+1, 10)
 									}
 								}
-								tresp, terr := cli.Txn(context.TODO()).
-									If(clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
-									Then(clientv3.OpPut(totalTaskNumKey, newTotalTaskNum)).
-									Commit()
-								if terr != nil {
-									te.Logger.Fatal("E! update total task num error: ", terr)
-								}
 
+								tresp, terr := kvc.Txn(context.TODO()).
+									If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+									Then(clientv3.OpPut(isCreatedKey, "true"),
+									clientv3.OpPut(taskIdInNodeKey, taskId),
+									clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
+									clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo)),
+									clientv3.OpPut(totalTaskNumKey, newTotalTaskNum),
+										).
+									Commit()
+
+								//tresp, terr := cli.Txn(context.TODO()).
+								//	If(clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+								//	Then(clientv3.OpPut(totalTaskNumKey, newTotalTaskNum)).
+								//	Commit()
+								if terr != nil {
+									te.Logger.Fatal("E! get total task num error: ", terr)
+								}
+								fmt.Println(runtime.Caller(1))
 								fmt.Println(tresp.Succeeded)
 								if tresp.Succeeded == true {
 									break
@@ -271,8 +283,6 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 						}
 					}
 				}(taskId, taskIdKey)
-
-
 
 			}
 		}
@@ -376,10 +386,10 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 							isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
 							break
 						}
-						fmt.Println(runtime.Caller(1))
+						fmt.Println(runtime.Caller(0))
 						fmt.Println(taskId, taskHostname)
 
-						time.Sleep(10 * time.Millisecond)
+						time.Sleep(1 * time.Second)
 					}
 					if isTaskUpdated == "true" {
 						return
@@ -481,10 +491,10 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 							isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
 							break
 						}
-						fmt.Println(runtime.Caller(1))
+						fmt.Println(runtime.Caller(0))
 						fmt.Println(taskId, taskHostname)
 
-						time.Sleep(10 * time.Microsecond)
+						time.Sleep(1 * time.Second)
 					}
 					if isTaskDeleted == "true" {
 						return
@@ -543,16 +553,16 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 						if terr != nil {
 							te.Logger.Fatal("E! failed to delete etcd task info: ", err)
 						}
-						fmt.Println(runtime.Caller(1))
+						fmt.Println(runtime.Caller(0))
 						fmt.Println(tresp.Succeeded)
 						if tresp.Succeeded == true {
 							break
 						}
+
+						time.Sleep(100 * time.Microsecond)
 					}
 
 				}(taskId)
-
-
 
 			}
 		}
@@ -628,6 +638,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 	cli := te.Cli
 	kvc := clientv3.NewKV(cli)
 
+
 	resp, err := cli.Get(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
 	if err != nil {
 		te.Logger.Println("E! get hostname error: ", err)
@@ -670,6 +681,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 
 	avgTaskNum := totalTaskNum/kapacitorNum + 1
 
+	var wg sync.WaitGroup
 	modifiedTasksNum := 0
 	for _, id := range taskIds {
 		if modifiedTasksNum + iTaskNum >= avgTaskNum {
@@ -696,44 +708,52 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 
 		// 检查id所在的节点是否被修改成功
 		if tresp.Succeeded == true {
+			wg.Add(1)
 			// 创建任务
-			taskConfigKey := prefixTasksConfigKey + id
-			gresp, err := cli.Get(context.TODO(), taskConfigKey)
-			if err != nil {
-				te.Logger.Fatal("E! faile to get task configuration", err)
-			}
+			modifiedTasksNum += 1
 
-			for _, ev := range gresp.Kvs {
-				if string(ev.Key) == taskConfigKey {
-					taskConfig := string(ev.Value)
+			go func(taskId string) {
+				defer wg.Done()
 
-					_, _, err := createTask(taskConfig, te.Kcli)
-					if err != nil {
-						// 创建任务失败
-						te.Logger.Println("E! recreate task error: ", err)
-						_, err := cli.Put(context.TODO(), prefixTasksIsCreatedKey+id, "false")
+				taskConfigKey := prefixTasksConfigKey + taskId
+				gresp, err := cli.Get(context.TODO(), taskConfigKey)
+				if err != nil {
+					te.Logger.Fatal("E! faile to get task configuration", err)
+				}
+
+				for _, ev := range gresp.Kvs {
+					if string(ev.Key) == taskConfigKey {
+						taskConfig := string(ev.Value)
+
+						_, _, err := createTask(taskConfig, te.Kcli)
 						if err != nil {
-							te.Logger.Fatal("E! failed to reset task info", err)
+							// 创建任务失败
+							te.Logger.Println("E! recreate task error: ", err)
+							_, err := cli.Put(context.TODO(), prefixTasksIsCreatedKey+taskId, "false")
+							if err != nil {
+								te.Logger.Fatal("E! failed to reset task info", err)
+							}
+
+							break
 						}
 
-						break
-					}
+						//
+						_, err = kvc.Txn(context.TODO()).
+							If(clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+taskId), "=", "processing")).
+							Then(clientv3.OpPut(prefixTasksIsCreatedKey+taskId, "true")).
+							Commit()
+						if err != nil {
+							te.Logger.Fatal("E! txn update task info error: ", err)
+						}
 
-					//
-					_, err = kvc.Txn(context.TODO()).
-						If(clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+id), "=", "processing")).
-						Then(clientv3.OpPut(prefixTasksIsCreatedKey+id, "true")).
-						Commit()
-					if err != nil {
-						te.Logger.Fatal("E! txn update task info error: ", err)
 					}
-					modifiedTasksNum += 1
-
 				}
-			}
+			}(id)
+
 		}
 
 	}
+	wg.Wait()
 }
 
 func createTask(task_config string, kcli *client.Client) (client.Task, string, error) {
