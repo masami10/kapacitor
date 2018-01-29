@@ -162,113 +162,117 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 					Then(clientv3.OpPut(taskIdKey, c.Hostname)).
 					Commit()
 				if err != nil {
-					te.Logger.Println("E! failed to set task's hostname: ", err)
-					continue
+					te.Logger.Fatalln("E! failed to set task's hostname: ", err)
 				}
 
 				// 检查事务条件是否成立
 				if kresp.Succeeded == false {
 					continue
 				}
+				go func(taskId, taskIdKey string) {
 
-				// 获取任务信息
-				taskConfigKey := prefixTasksConfigKey + taskId
+					// 获取任务信息
+					taskConfigKey := prefixTasksConfigKey + taskId
 
-				gresp, err := cli.Get(context.TODO(), taskConfigKey)
-				if err != nil {
-					te.Logger.Fatal("E! failed to get task configuration: ", err)
-				}
+					gresp, err := cli.Get(context.TODO(), taskConfigKey)
+					if err != nil {
+						te.Logger.Fatal("E! failed to get task configuration: ", err)
+					}
 
-				for _, ev := range gresp.Kvs {
-					if string(ev.Key) == taskConfigKey {
-						taskConfig := string(ev.Value)
+					for _, evc := range gresp.Kvs {
+						if string(evc.Key) == taskConfigKey {
+							taskConfig := string(evc.Value)
 
-						var t client.Task
-						t, statusCode, cerr := createTask(taskConfig, te.Kcli)
-						if cerr != nil {
-							// 创建任务失败
-							// 删除etcd上任务信息
-							te.Logger.Println("E! create tasks error: ", cerr)
-							grResp, gerr := cli.Grant(context.TODO(), 60)
-							if gerr != nil {
-								te.Logger.Fatal("E! etcd grant time error: ", cerr)
-							}
-							respData := fmt.Sprintf(respTemplate, statusCode, `"`+cerr.Error()+`"`)
+							var t client.Task
+							t, statusCode, cerr := createTask(taskConfig, te.Kcli)
+							if cerr != nil {
+								// 创建任务失败
+								// 删除etcd上任务信息
+								te.Logger.Println("E! create tasks error: ", cerr)
+								grResp, gerr := cli.Grant(context.TODO(), 60)
+								if gerr != nil {
+									te.Logger.Fatal("E! etcd grant time error: ", cerr)
+								}
+								respData := fmt.Sprintf(respTemplate, statusCode, `"`+cerr.Error()+`"`)
 
-							_, terr := kvc.Txn(context.TODO()).
-								If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
-								Then(clientv3.OpDelete(taskIdKey),
+								_, terr := kvc.Txn(context.TODO()).
+									If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
+									Then(clientv3.OpDelete(taskIdKey),
 									clientv3.OpDelete(prefixTasksConfigKey+taskId),
 									clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
-										).
-								Commit()
-							if terr != nil {
-								te.Logger.Fatal("E! etcd error while delete task information: ", terr)
-							}
-							break
-						}
-
-						// 成功创建任务
-						// 内容推送给kapacitor客户端
-						taskInfo := httpd.MarshalJSON(t, false)
-						respData := fmt.Sprintf(respTemplate, statusCode, taskInfo)
-
-						//fmt.Println("555555555555555", string(r))
-
-						grResp, err := cli.Grant(context.TODO(), 60)
-						if err != nil {
-							te.Logger.Fatal("E! etcd grant time error: ", err)
-						}
-
-						//
-						taskIdInNodeKey := prefixTasksInNodeKey + c.Hostname + "/" + taskId
-						kvc := clientv3.NewKV(cli)
-						taskIdKey := prefixTasksIdKey + taskId
-
-						_, err = kvc.Txn(context.TODO()).
-							If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
-							Then(clientv3.OpPut(isCreatedKey, "true"),
-								clientv3.OpPut(taskIdInNodeKey, taskId),
-								clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
-									clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo))).
-							Commit()
-						if err != nil {
-							te.Logger.Fatal("E! put task info error: ", err)
-						}
-
-						for {
-							// 把任务数量加一
-							var totalTaskNum string
-							var newTotalTaskNum string
-							fmt.Println(247)
-							resp, err := cli.Get(context.TODO(), totalTaskNumKey)
-							if err != nil {
-								te.Logger.Fatal("E! get total task num error: ", err)
-							}
-							for _, ev := range resp.Kvs {
-								if string(ev.Key) == totalTaskNumKey {
-									totalTaskNum = string(ev.Value)
-									num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
-									newTotalTaskNum = strconv.FormatInt(num+1, 10)
+								).
+									Commit()
+								if terr != nil {
+									te.Logger.Fatal("E! etcd error while delete task information: ", terr)
 								}
-							}
-							tresp, terr := cli.Txn(context.TODO()).
-								If(clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
-								Then(clientv3.OpPut(totalTaskNumKey, newTotalTaskNum)).
-								Commit()
-							if terr != nil {
-								te.Logger.Fatal("E! update total task num error: ", terr)
-							}
-
-							fmt.Println(tresp.Succeeded)
-							if tresp.Succeeded == true {
 								break
 							}
-							time.Sleep(100 * time.Microsecond)
-						}
 
+							// 成功创建任务
+							// 内容推送给kapacitor客户端
+							taskInfo := httpd.MarshalJSON(t, false)
+							respData := fmt.Sprintf(respTemplate, statusCode, taskInfo)
+
+							//fmt.Println("555555555555555", string(r))
+
+							grResp, err := cli.Grant(context.TODO(), 60)
+							if err != nil {
+								te.Logger.Fatal("E! etcd grant time error: ", err)
+							}
+
+							//
+							taskIdInNodeKey := prefixTasksInNodeKey + c.Hostname + "/" + taskId
+							kvc := clientv3.NewKV(cli)
+							taskIdKey := prefixTasksIdKey + taskId
+
+							_, err = kvc.Txn(context.TODO()).
+								If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
+								Then(clientv3.OpPut(isCreatedKey, "true"),
+								clientv3.OpPut(taskIdInNodeKey, taskId),
+								clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
+								clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo))).
+								Commit()
+							if err != nil {
+								te.Logger.Fatal("E! put task info error: ", err)
+							}
+
+							for {
+								// 把任务数量加一
+								var totalTaskNum string
+								var newTotalTaskNum string
+								fmt.Println(runtime.Caller(1))
+
+								resp, err := cli.Get(context.TODO(), totalTaskNumKey)
+								if err != nil {
+									te.Logger.Fatal("E! get total task num error: ", err)
+								}
+								for _, ev := range resp.Kvs {
+									if string(ev.Key) == totalTaskNumKey {
+										totalTaskNum = string(ev.Value)
+										num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
+										newTotalTaskNum = strconv.FormatInt(num+1, 10)
+									}
+								}
+								tresp, terr := cli.Txn(context.TODO()).
+									If(clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+									Then(clientv3.OpPut(totalTaskNumKey, newTotalTaskNum)).
+									Commit()
+								if terr != nil {
+									te.Logger.Fatal("E! update total task num error: ", terr)
+								}
+
+								fmt.Println(tresp.Succeeded)
+								if tresp.Succeeded == true {
+									break
+								}
+								time.Sleep(100 * time.Microsecond)
+							}
+
+						}
 					}
-				}
+				}(taskId, taskIdKey)
+
+
 
 			}
 		}
@@ -332,105 +336,108 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 		revision := strconv.FormatInt(wresp.Header.GetRevision(), 10)
 		for _, ev := range wresp.Events {
 			if ev.Type.String() == "PUT" {
-				key := string(ev.Kv.Key)
-				data := string(ev.Kv.Value)
-				taskId := strings.Split(key, "/")[3]
+				go func(ev *clientv3.Event) {
+					key := string(ev.Kv.Key)
+					data := string(ev.Kv.Value)
+					taskId := strings.Split(key, "/")[3]
 
-				// 等待被任务修改或执行修改任务
-				isTaskUpdated := "false"
-				isTaskCreated := "false"
-				for {
-					// 检查任务是否被修改，如果被修改，key会被删除
-					gresp, err := cli.Get(context.TODO(), key)
-					if err != nil {
-						te.Logger.Fatalln("E! failed to get patch key info: ", err)
-					}
-					if len(gresp.Kvs) == 0 {
-						isTaskUpdated = "true"
-						break
-					}
-
-					// 获取task所在的节点
-					taskIdKey := prefixTasksIdKey + taskId
-					gresp, err = cli.Get(context.TODO(), taskIdKey)
-					if err != nil {
-						te.Logger.Fatalln("E! failed to get tasks info: ", err)
-					}
-					if len(gresp.Kvs) == 0 {
-						isTaskUpdated = "true"
-						break
-					}
-					var taskHostname string
-					for _, ev := range gresp.Kvs {
-						if string(ev.Key) == taskIdKey {
-							taskHostname = string(ev.Value)
+					// 等待被任务修改或执行修改任务
+					isTaskUpdated := "false"
+					isTaskCreated := "false"
+					for {
+						// 检查任务是否被修改，如果被修改，key会被删除
+						gresp, err := cli.Get(context.TODO(), key)
+						if err != nil {
+							te.Logger.Fatalln("E! failed to get patch key info: ", err)
 						}
+						if len(gresp.Kvs) == 0 {
+							isTaskUpdated = "true"
+							break
+						}
+
+						// 获取task所在的节点
+						taskIdKey := prefixTasksIdKey + taskId
+						gresp, err = cli.Get(context.TODO(), taskIdKey)
+						if err != nil {
+							te.Logger.Fatalln("E! failed to get tasks info: ", err)
+						}
+						if len(gresp.Kvs) == 0 {
+							isTaskUpdated = "true"
+							break
+						}
+						var taskHostname string
+						for _, ev := range gresp.Kvs {
+							if string(ev.Key) == taskIdKey {
+								taskHostname = string(ev.Value)
+							}
+						}
+						if taskHostname == c.Hostname {
+							// 等待任务被创建
+							isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
+							break
+						}
+						fmt.Println(runtime.Caller(1))
+						fmt.Println(taskId, taskHostname)
+
+						time.Sleep(10 * time.Millisecond)
 					}
-					if taskHostname == c.Hostname {
-						// 等待任务被创建
-						isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
-						break
+					if isTaskUpdated == "true" {
+						return
 					}
-					fmt.Println(runtime.Caller(1))
-					fmt.Println(taskId, taskHostname)
 
-					time.Sleep(10 * time.Millisecond)
-				}
-				if isTaskUpdated == "true" {
-					continue
-				}
+					if isTaskCreated != "true" {
+						return
+					}
 
-				if isTaskCreated != "true" {
-					continue
-				}
+					grResp, err := cli.Grant(context.TODO(), 60)
+					if err != nil {
+						te.Logger.Fatal("E! failed to grant", err)
+					}
 
-				grResp, err := cli.Grant(context.TODO(), 60)
-				if err != nil {
-					te.Logger.Fatal("E! failed to grant", err)
-				}
+					var t client.Task
+					t, statusCode, err := updateTask(taskId, data,te.Kcli)
+					if err != nil {
+						// 修改任务失败
+						respData := fmt.Sprintf(respTemplate, statusCode, `"`+err.Error()+`"`)
 
-				var t client.Task
-				t, statusCode, err := updateTask(taskId, data,te.Kcli)
-				if err != nil {
-					// 修改任务失败
-					respData := fmt.Sprintf(respTemplate, statusCode, `"`+err.Error()+`"`)
+						_, err = kvc.Txn(context.TODO()).
+							If(clientv3.Compare(clientv3.ModRevision(prefixOpPatchKey+taskId), "=", wresp.Header.GetRevision())).
+							Then(clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
+							clientv3.OpDelete(prefixOpPatchKey+taskId)).
+							Commit()
+						if err != nil {
+							te.Logger.Fatal("E! txn update task info error: ", err)
+						}
+						return
+					}
+
+					// 给kapacitor客户端响应内容
+					taskInfo := httpd.MarshalJSON(t, false)
+					respData := fmt.Sprintf(respTemplate, statusCode, taskInfo)
+
+					var rawTask TaskConfig
+					rawTask.ID = t.ID
+					rawTask.Type = t.Type.String()
+					rawTask.Script = t.TICKscript
+					rawTask.DBRPs = t.DBRPs
+					rawTask.Status = t.Status.String()
+					rawTask.TemplateID = t.TemplateID
+					rawTask.Vars = t.Vars
+
+					taskConfigData := httpd.MarshalJSON(rawTask, false)
 
 					_, err = kvc.Txn(context.TODO()).
 						If(clientv3.Compare(clientv3.ModRevision(prefixOpPatchKey+taskId), "=", wresp.Header.GetRevision())).
 						Then(clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
+						clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo)),
+						clientv3.OpPut(prefixTasksConfigKey+taskId, string(taskConfigData)),
 						clientv3.OpDelete(prefixOpPatchKey+taskId)).
 						Commit()
 					if err != nil {
 						te.Logger.Fatal("E! txn update task info error: ", err)
 					}
-					continue
-				}
+				}(ev)
 
-				// 给kapacitor客户端响应内容
-				taskInfo := httpd.MarshalJSON(t, false)
-				respData := fmt.Sprintf(respTemplate, statusCode, taskInfo)
-
-				var rawTask TaskConfig
-				rawTask.ID = t.ID
-				rawTask.Type = t.Type.String()
-				rawTask.Script = t.TICKscript
-				rawTask.DBRPs = t.DBRPs
-				rawTask.Status = t.Status.String()
-				rawTask.TemplateID = t.TemplateID
-				rawTask.Vars = t.Vars
-
-				taskConfigData := httpd.MarshalJSON(rawTask, false)
-
-				_, err = kvc.Txn(context.TODO()).
-					If(clientv3.Compare(clientv3.ModRevision(prefixOpPatchKey+taskId), "=", wresp.Header.GetRevision())).
-					Then(clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
-						clientv3.OpPut(prefixTasksInfo+taskId, string(taskInfo)),
-						clientv3.OpPut(prefixTasksConfigKey+taskId, string(taskConfigData)),
-						clientv3.OpDelete(prefixOpPatchKey+taskId)).
-						Commit()
-				if err != nil {
-					te.Logger.Fatal("E! txn update task info error: ", err)
-				}
 			}
 		}
 	}
@@ -445,101 +452,107 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 		for _, ev := range wresp.Events {
 			if ev.Type.String() == "PUT" {
 				taskId := string(ev.Kv.Value)
-				// 获取task所在的节点
-				taskIdKey := prefixTasksIdKey + taskId
 
-				// 等待被任务删除或执行删除任务
-				var taskHostname string
-				isTaskDeleted := "false"
-				isTaskCreated := "false"
-				for {
-					gresp, err := cli.Get(context.TODO(), taskIdKey)
-					if err != nil {
-						te.Logger.Fatalln("E! get task info error: ", err)
+				go func(taskId string) {
+					// 获取task所在的节点
+					taskIdKey := prefixTasksIdKey + taskId
+
+					// 等待被任务删除或执行删除任务
+					var taskHostname string
+					isTaskDeleted := "false"
+					isTaskCreated := "false"
+					for {
+						gresp, err := cli.Get(context.TODO(), taskIdKey)
+						if err != nil {
+							te.Logger.Fatalln("E! get task info error: ", err)
+						}
+						if len(gresp.Kvs) == 0 {
+							isTaskDeleted = "true"
+							break
+						}
+
+						for _, ev := range gresp.Kvs {
+							if string(ev.Key) == taskIdKey {
+								taskHostname = string(ev.Value)
+							}
+						}
+						if taskHostname == c.Hostname {
+							// 等待任务被创建
+							isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
+							break
+						}
+						fmt.Println(runtime.Caller(1))
+						fmt.Println(taskId, taskHostname)
+
+						time.Sleep(10 * time.Microsecond)
 					}
-					if len(gresp.Kvs) == 0 {
-						isTaskDeleted = "true"
-						break
+					if isTaskDeleted == "true" {
+						return
+					}
+					if isTaskCreated != "true" {
+						return
 					}
 
-					for _, ev := range gresp.Kvs {
-						if string(ev.Key) == taskIdKey {
-							taskHostname = string(ev.Value)
+					// 删除kapacitor上任务, 任务总数减一
+					statusCode, derr := deleteTask(taskId, te.Kcli)
+
+					grResp, gerr := cli.Grant(context.TODO(), 60)
+					if gerr != nil {
+						te.Logger.Fatal("E! failed to grant", gerr)
+					}
+
+					if derr != nil {
+
+						respData := fmt.Sprintf(respTemplate, statusCode, `"`+derr.Error()+`"`)
+						_, perr := cli.Put(context.TODO(), prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))
+						if perr != nil {
+							te.Logger.Fatal("E! faliled to put response info: ", perr)
+						}
+						return
+					}
+
+
+					var totalTaskNum string
+					var newTotalTaskNum string
+
+					for {
+						gresp, err := cli.Get(context.TODO(), totalTaskNumKey)
+						if err != nil {
+							te.Logger.Fatal("E! get total task num error: ", err)
+						}
+						for _, ev := range gresp.Kvs {
+							if string(ev.Key) == totalTaskNumKey {
+								num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
+								totalTaskNum = strconv.FormatInt(num, 10)
+								newTotalTaskNum = strconv.FormatInt(num-1, 10)
+							}
+						}
+
+						respData := fmt.Sprintf(respTemplate, statusCode, `""`)
+
+						tresp, terr := kvc.Txn(context.TODO()).
+							If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+							Then(clientv3.OpDelete(taskIdKey),
+							clientv3.OpDelete(prefixTasksInNodeKey+c.Hostname+"/"+taskId),
+							clientv3.OpDelete(prefixTasksInfo+taskId),
+							clientv3.OpDelete(prefixTasksConfigKey+taskId),
+							clientv3.OpDelete(prefixTasksIsCreatedKey+taskId),
+							clientv3.OpPut(totalTaskNumKey, newTotalTaskNum),
+							clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))).
+							Commit()
+						if terr != nil {
+							te.Logger.Fatal("E! failed to delete etcd task info: ", err)
+						}
+						fmt.Println(runtime.Caller(1))
+						fmt.Println(tresp.Succeeded)
+						if tresp.Succeeded == true {
+							break
 						}
 					}
-					if taskHostname == c.Hostname {
-						// 等待任务被创建
-						isTaskCreated = WaitForTaskCreated(taskId, cli, te.Logger)
-						break
-					}
-					fmt.Println(runtime.Caller(1))
-					fmt.Println(taskId, taskHostname)
 
-					time.Sleep(10 * time.Microsecond)
-				}
-				if isTaskDeleted == "true" {
-					continue
-				}
-				if isTaskCreated != "true" {
-					continue
-				}
-
-				// 删除kapacitor上任务, 任务总数减一
-				statusCode, derr := deleteTask(taskId, te.Kcli)
-
-				grResp, gerr := cli.Grant(context.TODO(), 60)
-				if gerr != nil {
-					te.Logger.Fatal("E! failed to grant", gerr)
-				}
-
-				if derr != nil {
-
-					respData := fmt.Sprintf(respTemplate, statusCode, `"`+derr.Error()+`"`)
-					_, perr := cli.Put(context.TODO(), prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))
-					if perr != nil {
-						te.Logger.Fatal("E! faliled to put response info: ", perr)
-					}
-					continue
-				}
+				}(taskId)
 
 
-				var totalTaskNum string
-				var newTotalTaskNum string
-
-				for {
-					gresp, err := cli.Get(context.TODO(), totalTaskNumKey)
-					if err != nil {
-						te.Logger.Fatal("E! get total task num error: ", err)
-					}
-					for _, ev := range gresp.Kvs {
-						if string(ev.Key) == totalTaskNumKey {
-							num, _ := strconv.ParseInt(string(ev.Value), 10, 64)
-							totalTaskNum = strconv.FormatInt(num, 10)
-							newTotalTaskNum = strconv.FormatInt(num-1, 10)
-						}
-					}
-
-					respData := fmt.Sprintf(respTemplate, statusCode, `""`)
-
-					tresp, terr := kvc.Txn(context.TODO()).
-						If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskHostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
-						Then(clientv3.OpDelete(taskIdKey),
-						clientv3.OpDelete(prefixTasksInNodeKey+taskHostname+"/"+taskId),
-						clientv3.OpDelete(prefixTasksInfo+taskId),
-						clientv3.OpDelete(prefixTasksConfigKey+taskId),
-						clientv3.OpDelete(prefixTasksIsCreatedKey+taskId),
-						clientv3.OpPut(totalTaskNumKey, newTotalTaskNum),
-						clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID))).
-						Commit()
-					if terr != nil {
-						te.Logger.Fatal("E! failed to delete etcd task info: ", err)
-					}
-					fmt.Println(runtime.Caller(1))
-					fmt.Println(tresp.Succeeded)
-					if tresp.Succeeded == true {
-						break
-					}
-				}
 
 			}
 		}
