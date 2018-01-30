@@ -1,45 +1,39 @@
 package tasksched
 
 import (
-	"strconv"
 	"github.com/coreos/etcd/clientv3"
 	"context"
-	"time"
 	"log"
+	"fmt"
+	"runtime"
 )
 
-func cfs(cli *clientv3.Client, hostname string) time.Duration {
+func cfs(cli *clientv3.Client, hostname string) int {
 	// 计算延迟事务时间
 	// 1. 查询总任务数
-	taskNum := int64(0)
-	resp, err := cli.Get(context.TODO(), totalTaskNumKey)
+	resp, err := cli.Get(context.TODO(), prefixTasksIdKey, clientv3.WithPrefix())
 	if err != nil {
 		log.Fatal("E! failed to get total task num", err)
 	}
-	for _, ev := range resp.Kvs {
-		if string(ev.Key) == totalTaskNumKey {
-			taskNum, _ = strconv.ParseInt(string(ev.Value), 10, 64)
-		}
-	}
+	taskNum := len(resp.Kvs)
+
 	// 2. 查询节点数
 	resp, err = cli.Get(context.TODO(), prefixHostnameKey, clientv3.WithPrefix())
-	nodeNum := int64(len(resp.Kvs))
+	nodeNum := len(resp.Kvs)
 
 	// 3. 查询节点任务数
 	tasksInNodeKey := prefixTasksInNodeKey + hostname
 	resp, err = cli.Get(context.TODO(), tasksInNodeKey, clientv3.WithPrefix())
-	nodeTaskNum := int64(len(resp.Kvs))
+	nodeTaskNum := len(resp.Kvs)
 
 	// 4. 计算每个节点应该分配的任务数
-	avgTaskNum := (taskNum+1)/nodeNum + 1
+	avgTaskNum := (taskNum)/nodeNum + 1
 
 	// 5. 计算延迟抓取时间
 	diff := nodeTaskNum - avgTaskNum
 
-	delay := int64(0)
-	if diff >= 0 {
-		delay = diff + 1
-	}
+	fmt.Println(runtime.Caller(1))
+	fmt.Println(nodeTaskNum, avgTaskNum)
 
-	return time.Duration(delay) * time.Second
+	return diff
 }
