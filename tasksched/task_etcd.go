@@ -25,6 +25,7 @@ const (
 	prefixHostnameKey       = "kapacitors/hostname/"
 	prefixHostnameRevKey    = "kapacitors/rev/"
 	prefixTasksIdKey        = "tasks/id/"
+	prefixTasksHostnameKey  = "tasks/tasks_id/"
 	prefixTasksConfigKey    = "tasks/config/"
 	prefixTasksInfo			= "tasks/info/"
 	prefixTasksIsCreatedKey = "tasks/is_created/"
@@ -161,12 +162,12 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 				taskId := string(ev.Kv.Value)
 
 				// 事务修改etcd任务所在节点信息
-				taskIdKey := prefixTasksIdKey + taskId
+				taskIdHostnameKey := prefixTasksHostnameKey + taskId
 				isCreatedKey := prefixTasksIsCreatedKey + taskId
 				kvc := clientv3.NewKV(cli)
 				kresp, err := kvc.Txn(context.TODO()).
-					If(clientv3.Compare(clientv3.Value(taskIdKey), "=", taskId), clientv3.Compare(clientv3.CreateRevision(isCreatedKey), "=", 0)).
-					Then(clientv3.OpPut(taskIdKey, c.Hostname)).
+					If(clientv3.Compare(clientv3.CreateRevision(taskIdHostnameKey), "=", 0), clientv3.Compare(clientv3.CreateRevision(isCreatedKey), "=", 0)).
+					Then(clientv3.OpPut(taskIdHostnameKey, c.Hostname)).
 					Commit()
 				if err != nil {
 					te.Logger.Fatalln("E! failed to set task's hostname: ", err)
@@ -176,7 +177,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 				if kresp.Succeeded == false {
 					continue
 				}
-				go func(taskId, taskIdKey string) {
+				go func(taskId, taskIdHostnameKey string) {
 
 					// 获取任务信息
 					taskConfigKey := prefixTasksConfigKey + taskId
@@ -203,8 +204,9 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 								respData := fmt.Sprintf(respTemplate, statusCode, `"`+cerr.Error()+`"`)
 
 								_, terr := kvc.Txn(context.TODO()).
-									If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname)).
-									Then(clientv3.OpDelete(taskIdKey),
+									If(clientv3.Compare(clientv3.Value(taskIdHostnameKey), "=", c.Hostname)).
+									Then(clientv3.OpDelete(taskIdHostnameKey),
+										clientv3.OpDelete(prefixTasksIdKey+taskId),
 									clientv3.OpDelete(prefixTasksConfigKey+taskId),
 									clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
 								).
@@ -223,7 +225,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 							//
 							taskIdInNodeKey := prefixTasksInNodeKey + c.Hostname + "/" + taskId
 							kvc := clientv3.NewKV(cli)
-							taskIdKey := prefixTasksIdKey + taskId
+							taskIdHostnameKey := prefixTasksHostnameKey + taskId
 
 
 							var totalTaskNum string
@@ -250,7 +252,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 								}
 
 								tresp, terr := kvc.Txn(context.TODO()).
-									If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+									If(clientv3.Compare(clientv3.Value(taskIdHostnameKey), "=", c.Hostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
 									Then(clientv3.OpPut(isCreatedKey, "true"),
 									clientv3.OpPut(taskIdInNodeKey, taskId),
 									clientv3.OpPut(prefixOpResponseKey+revision, respData, clientv3.WithLease(grResp.ID)),
@@ -272,7 +274,7 @@ func (te *TaskEtcd) WatchTaskid(c *server.Config) {
 
 						}
 					}
-				}(taskId, taskIdKey)
+				}(taskId, taskIdHostnameKey)
 
 			}
 		}
@@ -312,7 +314,7 @@ func WaitForTaskCreated(taskId string, cli *clientv3.Client, l *log.Logger) stri
 	for _, ev := range gresp.Kvs {
 		if string(ev.Key) == taskIdIsCreated {
 			isTaskCreated = string(ev.Value)
-			fmt.Println("isTaskCreated", isTaskCreated)
+			//fmt.Println("isTaskCreated", isTaskCreated)
 		}
 	}
 
@@ -345,8 +347,8 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 						}
 
 						// 获取task所在的节点
-						taskIdKey := prefixTasksIdKey + taskId
-						gresp, err = cli.Get(context.TODO(), taskIdKey)
+						taskIdHostnameKey := prefixTasksHostnameKey + taskId
+						gresp, err = cli.Get(context.TODO(), taskIdHostnameKey)
 						if err != nil {
 							te.Logger.Fatalln("E! failed to get tasks info: ", err)
 						}
@@ -355,7 +357,7 @@ func (te *TaskEtcd) WatchPatchKey(c *server.Config) {
 						}
 						var taskHostname string
 						for _, ev := range gresp.Kvs {
-							if string(ev.Key) == taskIdKey {
+							if string(ev.Key) == taskIdHostnameKey {
 								taskHostname = string(ev.Value)
 							}
 						}
@@ -442,12 +444,13 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 				go func(taskId string) {
 					// 获取task所在的节点
 					taskIdKey := prefixTasksIdKey + taskId
+					taskIdHostnameKey := prefixTasksHostnameKey + taskId
 
 					// 等待被任务删除或执行删除任务
 					var taskHostname string
 					isTaskCreated := "false"
 					for {
-						gresp, err := cli.Get(context.TODO(), taskIdKey)
+						gresp, err := cli.Get(context.TODO(), taskIdHostnameKey)
 						if err != nil {
 							te.Logger.Fatalln("E! get task info error: ", err)
 						}
@@ -456,7 +459,7 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 						}
 
 						for _, ev := range gresp.Kvs {
-							if string(ev.Key) == taskIdKey {
+							if string(ev.Key) == taskIdHostnameKey {
 								taskHostname = string(ev.Value)
 							}
 						}
@@ -520,8 +523,9 @@ func (te *TaskEtcd) WatchDeleteKey(c *server.Config) {
 						respData := fmt.Sprintf(respTemplate, statusCode, `""`)
 
 						tresp, terr := kvc.Txn(context.TODO()).
-							If(clientv3.Compare(clientv3.Value(taskIdKey), "=", c.Hostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
+							If(clientv3.Compare(clientv3.Value(taskIdHostnameKey), "=", c.Hostname), clientv3.Compare(clientv3.Value(totalTaskNumKey), "=", totalTaskNum)).
 							Then(clientv3.OpDelete(taskIdKey),
+								clientv3.OpDelete(taskIdHostnameKey),
 							clientv3.OpDelete(prefixTasksInNodeKey+c.Hostname+"/"+taskId),
 							clientv3.OpDelete(prefixTasksInfo+taskId),
 							clientv3.OpDelete(prefixTasksConfigKey+taskId),
@@ -655,7 +659,7 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 		id := strings.Split(key, "/")[2]
 		taskIds = append(taskIds, id)
 
-		fmt.Printf("%s = %s\n", ev.Key, ev.Value)
+		//fmt.Printf("%s = %s\n", ev.Key, ev.Value)
 	}
 
 	avgTaskNum := totalTaskNum/kapacitorNum + 1
@@ -667,16 +671,16 @@ func (te *TaskEtcd) RecreateTasks(c *server.Config) {
 			break
 		}
 
-		taskIdKey := prefixTasksIdKey + id
+		taskIdHostnameKey := prefixTasksHostnameKey + id
 
 
-		fmt.Println(taskIdKey)
+		fmt.Println(taskIdHostnameKey)
 		fmt.Println(runtime.Caller(1))
 
 		tresp, err := kvc.Txn(context.TODO()).
 			If(clientv3.Compare(clientv3.Value(prefixTasksIsCreatedKey+id), "=", "false")).
 			Then(clientv3.OpPut(prefixTasksIsCreatedKey+id, "processing"),
-				clientv3.OpPut(taskIdKey, c.Hostname),
+				clientv3.OpPut(taskIdHostnameKey, c.Hostname),
 				clientv3.OpPut(prefixTasksInNodeKey+c.Hostname+"/"+id, id),
 					).
 			Commit()
