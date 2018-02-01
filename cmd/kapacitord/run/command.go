@@ -126,17 +126,6 @@ func (cmd *Command) Run(args ...string) error {
 		return fmt.Errorf("write pid file: %s", err)
 	}
 
-	// registry to etcd
-	var keepAliveCh chan int
-
-	taskEtcd, err := tasksched.NewTaskEtcd(config, cmd.logService)
-	if err != nil {
-		return fmt.Errorf("E! Create tasketcd: %s", err)
-	}
-	go taskEtcd.RegistryToEtcd(config, keepAliveCh)
-
-
-
 	// Create server from config and start it.
 	buildInfo := server.BuildInfo{Version: cmd.Version, Commit: cmd.Commit, Branch: cmd.Branch}
 	s, err := server.New(config, buildInfo, cmd.logService)
@@ -149,6 +138,15 @@ func (cmd *Command) Run(args ...string) error {
 		return fmt.Errorf("open server: %s", err)
 	}
 	cmd.Server = s
+
+	// registry to etcd
+	var keepAliveCh chan int
+
+	taskEtcd, err := tasksched.NewTaskEtcd(config, cmd.Server.ServerID.String(), cmd.logService)
+	if err != nil {
+		return fmt.Errorf("E! Create tasketcd: %s", err)
+	}
+	go taskEtcd.RegistryToEtcd(config, keepAliveCh)
 
 	// Begin monitoring the server's error channel.
 	go cmd.monitorServerErrors()

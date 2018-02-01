@@ -8,7 +8,7 @@ import (
 	"runtime"
 )
 
-func cfs(cli *clientv3.Client, hostname string) (int, int) {
+func cfs(cli *clientv3.Client, serverId string) (int, int) {
 	// 计算延迟事务时间
 	// 1. 查询总任务数
 	resp, err := cli.Get(context.TODO(), prefixTasksIdKey, clientv3.WithPrefix())
@@ -22,7 +22,7 @@ func cfs(cli *clientv3.Client, hostname string) (int, int) {
 	nodeNum := len(resp.Kvs)
 
 	// 3. 查询节点任务数
-	tasksInNodeKey := prefixTasksInNodeKey + hostname
+	tasksInNodeKey := prefixTasksInNodeKey + serverId
 	resp, err = cli.Get(context.TODO(), tasksInNodeKey, clientv3.WithPrefix())
 	nodeTaskNum := len(resp.Kvs)
 
