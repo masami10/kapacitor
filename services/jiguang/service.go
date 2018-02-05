@@ -254,6 +254,9 @@ type postOptions struct {
 
 type postMessage struct {
 	MessageContent         string  `json:"msg_content,omitempty"`
+	Title    			   string `json:"title,omitempty"`
+	ContentType            string  `json:"content_type,omitempty"`
+	Extras 				   PostExtrainfo `json:"extras,omitempty"`
 }
 
 type postData struct {
@@ -318,7 +321,7 @@ func (s *Service) preparePost(message, title, subtype string, users string, deta
 		Notification: postNotification{
 			IOSMessage:postIOSNotification{Alert:message,Extras:PostExtrainfo{Level:priority(level), Subtype:messageType(subtype)}},
 			AndoridMessage:postAndroidNotification{Alert: message, Extras:PostExtrainfo{Level:priority(level), Subtype:messageType(subtype)},Title:title}}, //现阶段默认设定为message
-		Message:	  postMessage{MessageContent: messageContent(subtype,details)},
+		Message:	  postMessage{MessageContent: messageContent(subtype,details),Title:title, Extras:PostExtrainfo{Level:priority(level), Subtype:messageType(subtype)}},
 	}
 
 
