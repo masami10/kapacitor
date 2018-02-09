@@ -157,6 +157,9 @@ func (cmd *Command) Run(args ...string) error {
 	//　watch kapacitor hostname
 	go taskEtcd.WatchHostname(config)
 
+	//
+	go taskEtcd.WatchDeleteTasksInNodeKey(config)
+
 	// 查找is_create=false的任务并创建
 	go func() {
 		for {
