@@ -119,6 +119,9 @@ type authRespData struct {
 
 func (s *Service) login() error {
 	c := s.config()
+	if !c.Enabled {
+		return nil
+	}
 	authData := postAuthData{
 		Username: s.config().Username,
 		Password: s.config().Password,
@@ -187,6 +190,10 @@ func (s *Service) login() error {
 
 func (s *Service) tokenRefresh() error {
 	c := s.config()
+
+	if !c.Enabled{
+		return nil
+	}
 
 	u, err := url.Parse(c.APIServer)
 	if err != nil {
