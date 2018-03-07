@@ -13,6 +13,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/masami10/kapacitor/server"
 	"github.com/masami10/kapacitor/services/diagnostic"
+	"github.com/masami10/kapacitor/tasksched"
+	"time"
 )
 
 const logo = `
@@ -137,6 +139,38 @@ func (cmd *Command) Run(args ...string) error {
 
 	// Begin monitoring the server's error channel.
 	go cmd.monitorServerErrors()
+
+	// registry to etcd
+	var keepAliveCh chan int
+
+	taskEtcd, err := tasksched.NewTaskEtcd(config, cmd.Server.ServerID.String(), cmd.diagService)
+	if err != nil {
+		return fmt.Errorf("E! Create tasketcd: %s", err)
+	}
+	go taskEtcd.RegistryToEtcd(config, keepAliveCh)
+
+	// tasks
+	go taskEtcd.WatchTaskid(config)
+
+	//　watch kapacitor hostname
+	go taskEtcd.WatchHostname(config)
+
+	//
+	go taskEtcd.WatchDeleteTasksInNodeKey(config)
+
+	// 查找is_create=false的任务并创建
+	go func() {
+		for {
+			taskEtcd.RecreateTasks(config)
+			time.Sleep(3 * time.Second)
+		}
+	}()
+
+	// update task
+	go taskEtcd.WatchPatchKey(config)
+
+	// delete task
+	go taskEtcd.WatchDeleteKey(config)
 
 	return nil
 }
